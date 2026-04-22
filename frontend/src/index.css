@@ -1,0 +1,111 @@
+/* ─────────────────────────────────────────────────────────────
+   OpenClaw — Design tokens
+   ───────────────────────────────────────────────────────────── */
+
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  --bg-0: #0b0b0d;
+  --bg-1: #111114;
+  --bg-2: #17171b;
+  --bg-3: #1f1f24;
+  --bg-inset: #08080a;
+
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.15);
+
+  --text-0: #f2efe8;
+  --text-1: #d4d0c6;
+  --text-2: #8a867d;
+  --text-3: #57544d;
+
+  --accent: #d9a066;
+  --accent-soft: rgba(217, 160, 102, 0.12);
+  --accent-line: rgba(217, 160, 102, 0.35);
+
+  --success: #7ab47d;
+  --danger: #c97064;
+  --warning: #d9a066;
+
+  --r-sm: 3px;
+  --r-md: 5px;
+  --r-lg: 8px;
+
+  --font-display: 'Fraunces', 'Cormorant Garamond', serif;
+  --font-sans: 'DM Sans', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  margin: 0; padding: 0; height: 100%;
+  background: var(--bg-0);
+  color: var(--text-1);
+  font-family: var(--font-sans);
+  font-size: 14px; line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background:
+    radial-gradient(ellipse 80% 50% at 50% -10%, rgba(217, 160, 102, 0.04), transparent 60%),
+    var(--bg-0);
+}
+
+button { font-family: inherit; cursor: pointer; }
+input, textarea, select { font-family: inherit; font-size: inherit; color: inherit; }
+
+::selection { background: var(--accent-soft); color: var(--text-0); }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 5px;
+  border: 2px solid var(--bg-0);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+.oc-btn {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  color: var(--text-1);
+  padding: 8px 14px;
+  border-radius: var(--r-md);
+  font-size: 13px; font-weight: 500;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.oc-btn:hover {
+  background: var(--bg-3);
+  border-color: var(--border-strong);
+  color: var(--text-0);
+}
+.oc-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.oc-btn--primary {
+  background: var(--accent); border-color: var(--accent); color: #1a1410;
+}
+.oc-btn--primary:hover {
+  background: #e3ac76; border-color: #e3ac76; color: #1a1410;
+}
+.oc-btn--ghost {
+  background: transparent; border-color: transparent; color: var(--text-2);
+}
+.oc-btn--ghost:hover { background: var(--bg-2); color: var(--text-0); }
+.oc-btn--danger:hover { border-color: var(--danger); color: var(--danger); }
+
+.oc-input {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  color: var(--text-0);
+  padding: 9px 12px;
+  border-radius: var(--r-md);
+  font-size: 13px;
+  width: 100%;
+  transition: border-color 0.15s;
+}
+.oc-input:focus { outline: none; border-color: var(--accent-line); }
+.oc-input::placeholder { color: var(--text-3); }
