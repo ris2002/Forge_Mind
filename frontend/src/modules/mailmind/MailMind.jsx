@@ -26,44 +26,71 @@ const Skeleton = ({ width = "100%", height = 10 }) => (
 
 export default function MailMind() {
   const [emails, setEmails] = useState([]);
-  const [status, setStatus] = useState({ last_check: "—" });
+  const [status, setStatus] = useState({ last_check: "—", running: false, paused: false });
   const [selectedEmail, setSelectedEmail] = useState(null);
   const [summarising, setSummarising] = useState(false);
+  const [summariseFailed, setSummariseFailed] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
   const [replyPanel, setReplyPanel] = useState(null);
   const [fetching, setFetching] = useState(false);
+  const [daemonLoading, setDaemonLoading] = useState(false);
   const [draftLoading, setDraftLoading] = useState(false);
+  const [interval, setIntervalVal] = useState(30);
+  const [intervalSaving, setIntervalSaving] = useState(false);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [flaggedOnly, setFlaggedOnly] = useState(false);
   const [filtering, setFiltering] = useState(false);
 
+  const refreshStatus = () => mailmindApi.daemonStatus().then(setStatus).catch(() => {});
+
   useEffect(() => {
-    Promise.all([mailmindApi.daemonStatus(), mailmindApi.list()])
-      .then(([s, e]) => {
+    Promise.all([mailmindApi.daemonStatus(), mailmindApi.list(), mailmindApi.getSettings()])
+      .then(([s, e, settings]) => {
         setStatus(s);
         setEmails(Array.isArray(e) ? e : []);
+        if (settings?.check_interval) setIntervalVal(settings.check_interval);
       })
       .catch(() => {});
-    const interval = setInterval(() => mailmindApi.daemonStatus().then(setStatus).catch(() => {}), 60000);
-    return () => clearInterval(interval);
+    const tick = setInterval(refreshStatus, 15000);
+    return () => clearInterval(tick);
   }, []);
 
   const handleSelectEmail = async (email) => {
     setReplyPanel(null);
+    setSummariseFailed(false);
+    setRetryCount(0);
     const preview = email.body ? email.body.slice(0, 200).replace(/\s+/g, " ") + "…" : "";
     setSelectedEmail({ ...email, _preview: preview });
     if (email.summarised) return;
+    await _runSummarise(email);
+  };
 
+  const _runSummarise = async (email) => {
     setSummarising(true);
+    setSummariseFailed(false);
     try {
-      const res = await mailmindApi.summarise(email.id);
-      const updated = { ...email, summary: res.summary, summarised: true, _preview: undefined };
+      const summary = await mailmindApi.summariseStream(email.id, (partial) => {
+        setSelectedEmail(prev => prev?.id === email.id
+          ? { ...prev, summary: partial, summarised: false }
+          : prev
+        );
+      });
+      const updated = { ...email, summary, summarised: true, _preview: undefined };
       setSelectedEmail(updated);
       setEmails(prev => prev.map(e => e.id === email.id ? updated : e));
     } catch {
-      setSelectedEmail(prev => ({ ...prev, summary: "Could not summarise.", summarised: true }));
+      setSummariseFailed(true);
+      setSelectedEmail(prev => ({ ...prev, summary: "" }));
     }
     setSummarising(false);
+  };
+
+  const handleRetrySummarise = () => {
+    if (selectedEmail) {
+      setRetryCount(c => c + 1);
+      _runSummarise({ ...selectedEmail, summarised: false });
+    }
   };
 
   const handleFetch = async () => {
@@ -79,6 +106,38 @@ export default function MailMind() {
       }
     } catch (e) { console.error(e); }
     setFetching(false);
+  };
+
+  const handleStartDaemon = async () => {
+    setDaemonLoading(true);
+    await mailmindApi.startDaemon().catch(() => {});
+    await refreshStatus();
+    setDaemonLoading(false);
+  };
+
+  const handleStopDaemon = async () => {
+    setDaemonLoading(true);
+    await mailmindApi.stopDaemon().catch(() => {});
+    await refreshStatus();
+    setDaemonLoading(false);
+  };
+
+  const handlePauseDaemon = async () => {
+    await mailmindApi.pauseDaemon().catch(() => {});
+    await refreshStatus();
+  };
+
+  const handleResumeDaemon = async () => {
+    await mailmindApi.resumeDaemon().catch(() => {});
+    await refreshStatus();
+  };
+
+  const handleIntervalSave = async (val) => {
+    const mins = Math.max(1, parseInt(val) || 30);
+    setIntervalVal(mins);
+    setIntervalSaving(true);
+    await mailmindApi.saveSettings({ check_interval: mins }).catch(() => {});
+    setIntervalSaving(false);
   };
 
   const handleFlag = async (email) => {
@@ -140,7 +199,13 @@ export default function MailMind() {
   };
 
   const unread = emails.filter(e => !e.read).length;
-  const summaryDisplay = selectedEmail?.summarised ? selectedEmail.summary : selectedEmail?._preview || "";
+  const summaryDisplay = selectedEmail?.summary || selectedEmail?._preview || "";
+
+  const sortedEmails = [...emails].sort((a, b) => {
+    const ta = a.time_raw ? new Date(a.time_raw).getTime() : 0;
+    const tb = b.time_raw ? new Date(b.time_raw).getTime() : 0;
+    return tb - ta;
+  });
 
   return (
     <div style={{ height: "100vh", display: "flex", flexDirection: "column" }}>
@@ -156,7 +221,7 @@ export default function MailMind() {
       <div style={{
         padding: "20px 28px 16px",
         borderBottom: "1px solid var(--border-subtle)",
-        display: "flex", alignItems: "baseline", gap: 14,
+        display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap",
       }}>
         <h1 style={{
           fontFamily: "var(--font-display)", fontWeight: 500, fontSize: 22,
@@ -167,11 +232,73 @@ export default function MailMind() {
           color: "var(--text-3)", letterSpacing: "0.08em", textTransform: "uppercase",
         }}>Inbox triage</span>
         <div style={{ flex: 1 }} />
+
+        {/* Daemon status pill */}
+        <div style={{
+          display: "flex", alignItems: "center", gap: 6,
+          padding: "4px 10px",
+          background: status.running ? "var(--accent-soft)" : "var(--bg-2)",
+          border: `1px solid ${status.running ? "var(--accent-line)" : "var(--border-subtle)"}`,
+          borderRadius: 99, fontSize: 11, fontFamily: "var(--font-mono)",
+          color: status.running ? "var(--accent)" : "var(--text-3)",
+        }}>
+          <div style={{
+            width: 6, height: 6, borderRadius: "50%",
+            background: status.running && !status.paused ? "var(--accent)" : "var(--text-3)",
+            animation: status.running && !status.paused ? "oc-pulse 2s infinite" : "none",
+          }} />
+          {status.running
+            ? status.paused ? "auto · paused" : `auto · next ${status.next_check}`
+            : "manual only"}
+        </div>
+
         <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-2)" }}>
           {emails.length} emails
           {unread > 0 && <span style={{ color: "var(--accent)" }}> · {unread} unread</span>}
-          {status.last_check && status.last_check !== "—" && <> · last check {status.last_check}</>}
+          {status.last_check && status.last_check !== "—" && <> · last {status.last_check}</>}
         </span>
+
+        {/* Interval editor */}
+        <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+          <span style={{ fontSize: 11, color: "var(--text-3)", fontFamily: "var(--font-mono)" }}>every</span>
+          <input
+            type="number" min={1} value={interval}
+            onChange={e => setIntervalVal(e.target.value)}
+            onBlur={e => handleIntervalSave(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && handleIntervalSave(e.target.value)}
+            className="oc-input"
+            style={{
+              width: 48, padding: "5px 8px", fontSize: 12,
+              fontFamily: "var(--font-mono)", textAlign: "center",
+              opacity: intervalSaving ? 0.5 : 1,
+            }}
+          />
+          <span style={{ fontSize: 11, color: "var(--text-3)", fontFamily: "var(--font-mono)" }}>min</span>
+        </div>
+
+        {/* Daemon controls */}
+        {status.running ? (
+          <div style={{ display: "flex", gap: 6 }}>
+            {status.paused ? (
+              <button className="oc-btn" onClick={handleResumeDaemon}
+                style={{ padding: "7px 12px", fontSize: 12 }}>Resume auto</button>
+            ) : (
+              <button className="oc-btn" onClick={handlePauseDaemon}
+                style={{ padding: "7px 12px", fontSize: 12 }}>Pause auto</button>
+            )}
+            <button className="oc-btn oc-btn--danger" onClick={handleStopDaemon} disabled={daemonLoading}
+              style={{ padding: "7px 12px", fontSize: 12, color: "var(--danger)", borderColor: "rgba(201,112,100,0.3)" }}>
+              Stop auto
+            </button>
+          </div>
+        ) : (
+          <button className="oc-btn" onClick={handleStartDaemon} disabled={daemonLoading}
+            style={{ padding: "7px 12px", fontSize: 12 }}>
+            {daemonLoading ? "Starting…" : "Start auto"}
+          </button>
+        )}
+
+        {/* Manual fetch — always available */}
         <button className="oc-btn oc-btn--primary" onClick={handleFetch} disabled={fetching}
           style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", fontSize: 12 }}>
           <span style={{ animation: fetching ? "oc-spin 1s linear infinite" : "none", display: "flex" }}>
@@ -210,14 +337,14 @@ export default function MailMind() {
           </div>
 
           <div style={{ flex: 1, overflowY: "auto" }}>
-            {emails.length === 0 ? (
+            {sortedEmails.length === 0 ? (
               <div style={{ padding: "48px 20px", textAlign: "center" }}>
                 <p style={{ color: "var(--text-3)", fontSize: 12, margin: 0 }}>No emails yet</p>
                 <p style={{ color: "var(--text-3)", fontSize: 11, marginTop: 6 }}>
                   Click <span style={{ color: "var(--accent)" }}>Check inbox</span> to fetch
                 </p>
               </div>
-            ) : emails.map((email, i) => (
+            ) : sortedEmails.map((email, i) => (
               <div key={email.id} className="oc-email-row"
                 data-selected={selectedEmail?.id === email.id ? "true" : "false"}
                 onClick={() => handleSelectEmail(email)}
@@ -247,20 +374,9 @@ export default function MailMind() {
                   </span>
                 </div>
                 <p style={{
-                  fontSize: 12, color: "var(--text-1)", margin: 0, marginBottom: 4, fontWeight: 500,
+                  fontSize: 12, color: "var(--text-1)", margin: 0, fontWeight: 500,
                   whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
                 }}>{email.subject}</p>
-                {email.summarised ? (
-                  <p style={{
-                    fontSize: 11, color: "var(--text-2)", margin: 0, lineHeight: 1.5,
-                    display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden",
-                  }}>{email.summary}</p>
-                ) : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 5, paddingTop: 2 }}>
-                    <Skeleton width="90%" height={9} />
-                    <Skeleton width="65%" height={9} />
-                  </div>
-                )}
               </div>
             ))}
           </div>
@@ -288,9 +404,14 @@ export default function MailMind() {
               }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
                   <span style={{
-                    fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--accent)",
+                    fontFamily: "var(--font-mono)", fontSize: 10,
+                    color: summariseFailed ? "var(--danger)" : "var(--accent)",
                     letterSpacing: "0.08em", textTransform: "uppercase",
-                  }}>{summarising ? "Summarising" : "AI Summary"}</span>
+                  }}>
+                    {summarising
+                      ? retryCount > 0 ? `Retrying (${retryCount})…` : "Summarising"
+                      : summariseFailed ? "Failed" : "AI Summary"}
+                  </span>
                   {summarising && (
                     <div style={{ display: "flex", gap: 3 }}>
                       {[0, 0.2, 0.4].map((d, i) => (
@@ -303,11 +424,27 @@ export default function MailMind() {
                     </div>
                   )}
                   <div style={{ flex: 1, height: 1, background: "var(--accent-line)" }} />
+                  {summariseFailed && !summarising && (
+                    <button onClick={handleRetrySummarise}
+                      style={{
+                        display: "flex", alignItems: "center", gap: 4,
+                        background: "transparent", border: "1px solid var(--border)",
+                        borderRadius: "var(--r-sm)", padding: "3px 8px",
+                        fontSize: 10, fontFamily: "var(--font-mono)",
+                        color: "var(--text-2)", cursor: "pointer",
+                      }}>
+                      <Ic d={IC.refresh} size={10} /> {retryCount > 0 ? `Retry (${retryCount + 1})` : "Retry"}
+                    </button>
+                  )}
                 </div>
                 {summarising && !summaryDisplay ? (
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     <Skeleton height={12} /><Skeleton width="85%" height={12} /><Skeleton width="65%" height={12} />
                   </div>
+                ) : summariseFailed && !summarising ? (
+                  <p style={{ fontSize: 13, color: "var(--text-3)", lineHeight: 1.7, margin: 0, fontStyle: "italic" }}>
+                    Could not generate summary — check your LLM provider is running and try again.
+                  </p>
                 ) : (
                   <p style={{
                     fontSize: 13, color: summarising ? "var(--text-2)" : "var(--text-1)",

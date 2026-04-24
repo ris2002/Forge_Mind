@@ -1,8 +1,8 @@
 """
 Gmail IMAP/SMTP adapter.
 
-Keeps the raw mail connection logic separate from the HTTP routes and
-from any module that needs to use it.
+Credentials are stored encrypted via core.secret_store (Fernet).
+On first load, any legacy plaintext email_creds.json is migrated and deleted.
 """
 
 from __future__ import annotations
@@ -15,23 +15,45 @@ from email.mime.text import MIMEText
 from typing import Optional
 
 from core.config import DATA_DIR
+from core import secret_store
 
-CREDS_FILE = DATA_DIR / "email_creds.json"
+_LEGACY_CREDS_FILE = DATA_DIR / "email_creds.json"
+_KEY_EMAIL = "gmail_email"
+_KEY_PASSWORD = "gmail_app_password"
+
+
+def _migrate_legacy() -> None:
+    """Move plaintext email_creds.json into the encrypted store, then delete it."""
+    if not _LEGACY_CREDS_FILE.exists():
+        return
+    try:
+        data = json.loads(_LEGACY_CREDS_FILE.read_text())
+        secret_store.save_key(_KEY_EMAIL, data["email"])
+        secret_store.save_key(_KEY_PASSWORD, data["app_password"])
+        _LEGACY_CREDS_FILE.unlink()
+    except Exception as e:
+        print(f"[gmail] legacy credential migration failed: {e}")
 
 
 def load_creds() -> Optional[dict]:
-    if CREDS_FILE.exists():
-        return json.loads(CREDS_FILE.read_text())
+    _migrate_legacy()
+    email = secret_store.get_key(_KEY_EMAIL)
+    password = secret_store.get_key(_KEY_PASSWORD)
+    if email and password:
+        return {"email": email, "app_password": password}
     return None
 
 
 def save_creds(email_addr: str, app_password: str) -> None:
-    CREDS_FILE.write_text(json.dumps({"email": email_addr, "app_password": app_password}))
+    secret_store.save_key(_KEY_EMAIL, email_addr)
+    secret_store.save_key(_KEY_PASSWORD, app_password)
 
 
 def clear_creds() -> None:
-    if CREDS_FILE.exists():
-        CREDS_FILE.unlink()
+    secret_store.delete_key(_KEY_EMAIL)
+    secret_store.delete_key(_KEY_PASSWORD)
+    if _LEGACY_CREDS_FILE.exists():
+        _LEGACY_CREDS_FILE.unlink()
 
 
 def test_connection(email_addr: str, app_password: str) -> None:

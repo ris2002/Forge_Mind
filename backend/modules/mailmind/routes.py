@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from . import service
@@ -44,6 +45,7 @@ class ModuleSettingsIn(BaseModel):
     work_end: Optional[str] = None
     check_interval: Optional[int] = None
     chroma_path: Optional[str] = None
+    system_prompt: Optional[str] = None
 
 
 # ── emails ──────────────────────────────────────────────────
@@ -70,6 +72,17 @@ def summarise(email_id: str):
         return service.summarise(email_id)
     except LookupError:
         raise HTTPException(status_code=404, detail="Email not found")
+
+
+@router.post("/emails/{email_id}/summarise/stream")
+def summarise_stream(email_id: str):
+    from . import store as _store
+    if email_id not in _store.load_emails():
+        raise HTTPException(status_code=404, detail="Email not found")
+    return StreamingResponse(
+        service.summarise_stream(email_id),
+        media_type="text/plain",
+    )
 
 
 @router.post("/emails/flag")
@@ -147,6 +160,11 @@ def daemon_pause():
 @router.post("/daemon/resume")
 def daemon_resume():
     return service.resume_daemon()
+
+
+@router.post("/daemon/stop")
+def daemon_stop():
+    return service.stop_daemon()
 
 
 # ── module settings ─────────────────────────────────────────

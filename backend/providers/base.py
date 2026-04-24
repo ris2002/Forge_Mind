@@ -23,6 +23,10 @@ class BaseProvider(ABC):
     @abstractmethod
     def generate(self, prompt: str, model: str) -> str: ...
 
+    def generate_stream(self, prompt: str, model: str):
+        """Yield tokens one by one. Default: single chunk from generate()."""
+        yield self.generate(prompt, model)
+
     @abstractmethod
     def test(self, api_key: Optional[str] = None) -> tuple[bool, str]: ...
 

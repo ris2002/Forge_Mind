@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from filelock import FileLock
 
 from core.config import DATA_DIR
 
 EMAIL_STORE_FILE = DATA_DIR / "mailmind_emails.json"
 BLOCKLIST_FILE = DATA_DIR / "mailmind_blocklist.json"
+_EMAIL_LOCK = FileLock(str(EMAIL_STORE_FILE) + ".lock")
 
 PROMO_KEYWORDS = [
     "noreply", "no-reply", "newsletter", "marketing", "unsubscribe",
@@ -19,16 +21,18 @@ PROMO_KEYWORDS = [
 
 # ── email store ─────────────────────────────────────────────
 def load_emails() -> dict:
-    if EMAIL_STORE_FILE.exists():
-        try:
-            return json.loads(EMAIL_STORE_FILE.read_text())
-        except Exception:
-            return {}
-    return {}
+    with _EMAIL_LOCK:
+        if EMAIL_STORE_FILE.exists():
+            try:
+                return json.loads(EMAIL_STORE_FILE.read_text())
+            except Exception:
+                return {}
+        return {}
 
 
 def save_emails(store: dict) -> None:
-    EMAIL_STORE_FILE.write_text(json.dumps(store, indent=2))
+    with _EMAIL_LOCK:
+        EMAIL_STORE_FILE.write_text(json.dumps(store, indent=2))
 
 
 # ── blocklist ───────────────────────────────────────────────

@@ -27,7 +27,7 @@ Data lives in `~/.openclaw/`.
 ```
 main.py              # 30 lines. Mounts routers. Knows nothing module-specific.
 core/
-  config.py          # app constants
+  config.py          # app constants + CORS origins (localhost only)
   settings.py        # global + module-scoped settings (ModuleSettings)
   secret_store.py    # encrypted API key storage (Fernet)
   llm.py             # llm_generate() — the ONLY entry point modules use for LLM calls
@@ -40,18 +40,18 @@ providers/
   __init__.py        # PROVIDERS registry
   routes.py          # /api/providers/*
 auth/
-  gmail.py           # IMAP/SMTP adapter
+  gmail.py           # IMAP/SMTP adapter — credentials stored encrypted via secret_store
   routes.py          # /api/auth/*
 modules/
   __init__.py        # MODULE REGISTRY + meta router (/api/modules)
   mailmind/
     __init__.py      # manifest (id, name, description, router)
     routes.py        # /api/modules/mailmind/*
-    service.py       # business logic
+    service.py       # business logic + background daemon
     parsing.py       # pure functions, no I/O
-    store.py         # file-backed persistence
-    chroma.py        # vector store (optional)
-    prompts.py       # prompt templates
+    store.py         # file-backed persistence (FileLock protected)
+    chroma.py        # vector store (optional, path-validated)
+    prompts.py       # prompt templates (injection-hardened with <email> tags)
     settings.py      # module-scoped defaults
 ```
 
@@ -76,10 +76,75 @@ modules/
   registry.jsx       # SINGLE SOURCE: what modules exist in the frontend
   mailmind/
     index.jsx        # { manifest, Component, SettingsTab, icon }
-    MailMind.jsx
+    MailMind.jsx     # main view — daemon controls + inline interval editor
     MailMindSettings.jsx
     api.js           # module-scoped API client
 ```
+
+## MailMind — how it works
+
+### Manual vs auto fetch
+
+The inbox can be checked two ways:
+
+| Mode | How |
+|---|---|
+| **Manual** | Click **Check inbox** — always available, fires immediately |
+| **Auto (daemon)** | Click **Start auto** — background thread fetches on a schedule |
+
+Both modes coexist. Manual fetch always works even when the daemon is running.
+
+### Daemon
+
+The daemon runs as a background thread inside the FastAPI process. It reads settings
+on every cycle so changes take effect without a restart.
+
+**Controls (visible in the main header):**
+
+- **Start auto** — spawns the background thread
+- **Pause auto** — thread keeps running but skips fetches; countdown resets
+- **Resume auto** — picks up immediately on next tick
+- **Stop auto** — thread exits cleanly within 5 seconds
+
+**Settings that drive it (editable in Settings → MailMind or inline in the header):**
+
+| Setting | What it does |
+|---|---|
+| `check_interval` | Minutes between fetches. Editable inline from the header. |
+| `work_start` / `work_end` | Fetches are skipped outside these hours |
+
+### Reply instructions (system prompt)
+
+Settings → MailMind → **Reply instructions** lets you tell the LLM how to write your replies — tone, rules, things to always or never say.
+
+The default prompt shipped with the app:
+
+> Be concise and professional. Get to the point in the first sentence — no filler openers like "I hope this email finds you well". Match the tone of the sender: formal if they are formal, relaxed if they are casual. Never use placeholders or make up facts not given. Keep replies under 150 words unless the topic genuinely requires more.
+
+Changes take effect immediately — the next draft you generate will use the updated instructions. If the field is left empty the block is omitted from the prompt entirely.
+
+The status pill in the header shows the current state (`manual only`, `auto · next 14:32 +5m`, `auto · paused`) and pulses green when actively running.
+
+### Email summarisation (streaming)
+
+Summaries are generated on demand when you click an email (lazy — no cost for emails you never open). The result is cached in the store so the LLM is never called twice for the same email.
+
+Summaries stream token by token via `POST /emails/{id}/summarise/stream` so text appears immediately rather than after a full wait. Streaming chunks are shown in real-time as they arrive — the display is driven by the accumulating `summary` field, not a cached preview. The store is protected by a `FileLock` and the result is written back with a fresh read after generation — so clicking two emails simultaneously won't corrupt either result.
+
+Ollama generation is capped at `num_predict: 300` tokens and `num_ctx: 2048` to keep inference fast on small models.
+
+If the LLM returns nothing (model not loaded, Ollama down, etc.) the backend falls back to a plain-text extract from the email body rather than returning an empty stream. This means the user always sees something, even without a working LLM.
+
+### Email list view
+
+The email list shows sender, subject, and timestamp only — no summary preview in the list. The AI summary only appears in the detail panel when an email is opened. Emails are sorted newest-first.
+
+### Retry on failed summary
+
+If summarisation fails, a **Retry** button appears in the summary box. Each retry attempt:
+- Increments a visible counter (`Retry (2)`, `Retry (3)`, …)
+- Shows `Retrying (N)…` in the header label while in progress
+- Forces a fresh LLM call, bypassing the cache check
 
 ## Adding a new module
 
@@ -132,14 +197,12 @@ That's the whole backend. `main.py` is untouched.
    export const notesApi = {
      list: () => get(`${BASE}/notes`),
      create: (body) => post(`${BASE}/notes`, body),
-     // etc.
    };
    ```
 
 3. **Create `frontend/src/modules/notes/index.jsx`**:
    ```jsx
    import Notes from "./Notes";
-   // import NotesSettings from "./NotesSettings"; // optional
 
    export const manifest = {
      id: "notes",
@@ -147,7 +210,6 @@ That's the whole backend. `main.py` is untouched.
      description: "Quick AI-assisted notes",
    };
    export const Component = Notes;
-   // export const SettingsTab = NotesSettings; // optional
 
    export function icon({ size = 16, color = "currentColor" } = {}) {
      return (
@@ -182,6 +244,34 @@ Done. Shell renders the sidebar item, App routes to your component, Settings ren
 
 **Module settings:** `core.settings.module_settings(id, defaults)` gives you a scoped view. Your settings live under `settings.json` → `modules.<id>` automatically.
 
+## API surface
+
+```
+/api/auth/*                               Gmail connect/status/signout
+/api/providers                            List all LLM providers
+/api/providers/{id}/models                Available models
+/api/providers/key                        POST: save key
+/api/providers/active                     POST: switch active provider
+/api/providers/model                      POST: switch model for a provider
+/api/modules                              List registered modules
+/api/modules/mailmind/emails              GET: list (supports date_from, date_to, flagged_only)
+/api/modules/mailmind/emails/fetch        POST: manual inbox fetch
+/api/modules/mailmind/emails/{id}/summarise   POST: generate + cache AI summary
+/api/modules/mailmind/emails/flag         POST: toggle flag
+/api/modules/mailmind/emails/dismiss      POST: remove from store
+/api/modules/mailmind/emails/{id}/block-sender  POST: block + remove
+/api/modules/mailmind/reply/draft         POST: generate reply draft
+/api/modules/mailmind/reply/send          POST: send via SMTP
+/api/modules/mailmind/blocklist           GET / add / remove
+/api/modules/mailmind/daemon/status       GET: running, paused, last_check, next_check
+/api/modules/mailmind/daemon/start        POST: start background poller
+/api/modules/mailmind/daemon/pause        POST: pause (thread stays alive)
+/api/modules/mailmind/daemon/resume       POST: resume
+/api/modules/mailmind/daemon/stop         POST: stop thread
+/api/modules/mailmind/emails/{id}/summarise/stream  POST: streaming summary (text/plain, token by token)
+/api/modules/mailmind/settings            GET / POST: module settings (user_name, user_title, work_start, work_end, check_interval, chroma_path, system_prompt)
+```
+
 ## Design tokens
 
 All styling uses CSS variables in `frontend/src/index.css`:
@@ -192,22 +282,13 @@ All styling uses CSS variables in `frontend/src/index.css`:
 
 Retune the theme in one file.
 
-## API surface
+## Privacy & security
 
-```
-/api/auth/*                          Gmail connect/status/signout
-/api/providers                       List all LLM providers
-/api/providers/{id}/models           Available models
-/api/providers/key                   POST: save + test key
-/api/providers/active                POST: switch active provider
-/api/providers/model                 POST: switch model for a provider
-/api/modules                         List registered modules
-/api/modules/{module_id}/*           Module-specific routes
-```
-
-## Privacy
-
-- Ollama is default. With it installed and running, no prompts leave your machine.
-- Cloud providers activate only when explicitly selected and a valid key is saved.
-- API keys are Fernet-encrypted in `~/.openclaw/keys.enc`. Master key at `~/.openclaw/master.key` (`chmod 600`).
-- Falls back to plaintext + warning if `cryptography` isn't installed.
+- **Ollama is default.** With it installed and running, no prompts leave your machine.
+- **Cloud providers** activate only when explicitly selected and a valid key is saved.
+- **API keys** are Fernet-encrypted in `~/.openclaw/keys.enc`. Master key at `~/.openclaw/master.key` (chmod 600).
+- **Gmail credentials** are stored encrypted via the same Fernet store — not in plaintext. Any legacy `email_creds.json` is migrated and deleted on first run.
+- **CORS** is restricted to `localhost:5173`, `localhost:3000`, and `app://.` only.
+- **Prompt injection** is mitigated by wrapping all email content in `<email>` tags with an explicit instruction to treat it as data.
+- **chroma_path** is validated against system directories (`/etc`, `/sys`, `/proc`, etc.) before use.
+- Falls back to plaintext key storage + warning if `cryptography` isn't installed.

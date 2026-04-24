@@ -6,6 +6,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+_BLOCKED_PREFIXES = ("/etc", "/sys", "/proc", "/dev", "/usr", "/bin", "/sbin", "/boot")
+
+
+def _safe_resolve(chroma_path: str) -> Optional[str]:
+    resolved = str(Path(chroma_path).expanduser().resolve())
+    if any(resolved.startswith(p) for p in _BLOCKED_PREFIXES):
+        print(f"[mailmind.chroma] rejected unsafe chroma_path: {resolved}")
+        return None
+    return resolved
+
 
 def _get_collection(chroma_path: str):
     """Lazy-import chromadb so the module works without it (feature is optional)."""
@@ -16,7 +26,9 @@ def _get_collection(chroma_path: str):
         return None
 
     try:
-        resolved = str(Path(chroma_path).expanduser().resolve())
+        resolved = _safe_resolve(chroma_path)
+        if not resolved:
+            return None
         Path(resolved).mkdir(parents=True, exist_ok=True)
         client = chromadb.PersistentClient(path=resolved)
         return client.get_or_create_collection(

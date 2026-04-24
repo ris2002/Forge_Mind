@@ -1,6 +1,7 @@
 import { get, post } from "../../api/client";
 
 const BASE = "/api/modules/mailmind";
+const BACKEND = "http://localhost:8000";
 
 export const mailmindApi = {
   // emails
@@ -14,6 +15,21 @@ export const mailmindApi = {
   },
   fetchInbox:     () => post(`${BASE}/emails/fetch`),
   summarise:      (id) => post(`${BASE}/emails/${id}/summarise`),
+  summariseStream: async (id, onChunk) => {
+    const res = await fetch(`${BACKEND}${BASE}/emails/${id}/summarise/stream`, { method: "POST" });
+    if (!res.ok) throw new Error(`Stream failed: ${res.status}`);
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let full = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      full += decoder.decode(value, { stream: true });
+      onChunk(full);
+    }
+    if (!full.trim()) throw new Error("LLM returned empty response");
+    return full;
+  },
   flag:           (id) => post(`${BASE}/emails/flag`, { email_id: id }),
   dismiss:        (id) => post(`${BASE}/emails/dismiss`, { email_id: id }),
   blockSender:    (id) => post(`${BASE}/emails/${id}/block-sender`),
@@ -30,6 +46,9 @@ export const mailmindApi = {
   // daemon
   daemonStatus:   () => get(`${BASE}/daemon/status`),
   startDaemon:    () => post(`${BASE}/daemon/start`),
+  stopDaemon:     () => post(`${BASE}/daemon/stop`),
+  pauseDaemon:    () => post(`${BASE}/daemon/pause`),
+  resumeDaemon:   () => post(`${BASE}/daemon/resume`),
 
   // module settings
   getSettings:    () => get(`${BASE}/settings`),

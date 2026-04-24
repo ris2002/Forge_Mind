@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 import requests
@@ -9,6 +10,7 @@ import requests
 from .base import BaseProvider, clean_llm_output
 
 OLLAMA_URL = "http://localhost:11434"
+_OPTIONS = {"num_predict": 300, "num_ctx": 2048}
 
 
 class OllamaProvider(BaseProvider):
@@ -20,11 +22,29 @@ class OllamaProvider(BaseProvider):
     def generate(self, prompt: str, model: str) -> str:
         res = requests.post(
             f"{OLLAMA_URL}/api/generate",
-            json={"model": model, "prompt": prompt, "stream": False},
+            json={"model": model, "prompt": prompt, "stream": False, "options": _OPTIONS},
             timeout=120,
         )
         res.raise_for_status()
         return clean_llm_output(res.json().get("response", "").strip())
+
+    def generate_stream(self, prompt: str, model: str):
+        res = requests.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={"model": model, "prompt": prompt, "stream": True, "options": _OPTIONS},
+            stream=True,
+            timeout=120,
+        )
+        res.raise_for_status()
+        for line in res.iter_lines():
+            if not line:
+                continue
+            data = json.loads(line)
+            token = data.get("response", "")
+            if token:
+                yield token
+            if data.get("done"):
+                break
 
     def test(self, api_key: Optional[str] = None) -> tuple[bool, str]:
         try:
