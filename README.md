@@ -94,6 +94,13 @@ The inbox can be checked two ways:
 
 Both modes coexist. Manual fetch always works even when the daemon is running.
 
+### What gets fetched
+
+Every fetch (manual or daemon) searches `ALL` mail — seen and unseen. The 30 most
+recent emails by IMAP UID are considered. UIDs are sorted numerically so newer
+emails (which have higher UIDs) are never silently dropped. Emails matching the
+promo keyword list or the sender blocklist are filtered out before storing.
+
 ### Daemon
 
 The daemon runs as a background thread inside the FastAPI process. It reads settings
@@ -129,7 +136,7 @@ The status pill in the header shows the current state (`manual only`, `auto · n
 
 Summaries are generated on demand when you click an email (lazy — no cost for emails you never open). The result is cached in the store so the LLM is never called twice for the same email.
 
-Summaries stream token by token via `POST /emails/{id}/summarise/stream` so text appears immediately rather than after a full wait. Streaming chunks are shown in real-time as they arrive — the display is driven by the accumulating `summary` field, not a cached preview. The store is protected by a `FileLock` and the result is written back with a fresh read after generation — so clicking two emails simultaneously won't corrupt either result.
+Summaries stream token by token via `POST /emails/{id}/summarise/stream` so text appears immediately rather than after a full wait. The store is protected by a `FileLock` and the result is written back with a fresh read after generation — so clicking two emails simultaneously won't corrupt either result.
 
 Ollama generation is capped at `num_predict: 300` tokens and `num_ctx: 2048` to keep inference fast on small models.
 
@@ -137,11 +144,11 @@ If the LLM returns nothing (model not loaded, Ollama down, etc.) the backend fal
 
 ### Email list view
 
-The email list shows sender, subject, and timestamp only — no summary preview in the list. The AI summary only appears in the detail panel when an email is opened. Emails are sorted newest-first.
+The email list shows sender, subject, and timestamp only. Emails are sorted newest-first.
 
-**Read / unread styling:** unread emails show an amber dot, bold sender name, and bold subject. Read emails dim both sender and subject to lower-contrast colours — no dismissal needed to distinguish handled from new.
+**Read / unread styling:** unread emails show an amber dot, bold sender name, and bold subject. Read emails dim both sender and subject to lower-contrast colours.
 
-**Filter bar:** date range + flagged-only filter is pinned sticky at the top of the list column. Scrolling anywhere in the column (including over the filter bar) scrolls the email list. The active filter is preserved across daemon auto-refreshes — new emails pulled in by the daemon are merged into the filtered view, not shown unfiltered.
+**Filter bar:** date range + flagged-only filter is pinned sticky at the top of the list column. Scrolling anywhere in the column (including over the filter bar) scrolls the email list. The active filter is preserved across daemon auto-refreshes.
 
 ### Retry on failed summary
 
@@ -150,37 +157,132 @@ If summarisation fails, a **Retry** button appears in the summary box. Each retr
 - Shows `Retrying (N)…` in the header label while in progress
 - Forces a fresh LLM call, bypassing the cache check
 
-### Flagged emails — conversation tracking
+---
 
-Flagging an email switches it from per-email summarisation to **conversation-level summarisation**. The conversation is defined by emails that share both the same sender address and the same base thread subject (stripping `Re:`, `Fwd:`, etc.). Up to the 5 most recent emails in that thread are included in the summary prompt.
+## Normal email flow
 
-**Conversation summary lifecycle:**
-1. Flag email → summary reset, email re-opens in "Building conversation…" state
-2. Conversation summary generates and streams in — includes all matched thread emails
-3. Summary is saved and embedded into ChromaDB (used as context when drafting replies)
-4. Unflag → summary reset, embedding deleted from ChromaDB, next open gets a per-email summary
-5. New reply arrives from same sender on same thread → flagged email's summary is automatically invalidated on next fetch → reopening regenerates an updated conversation summary
+Every email that is not flagged follows this flow:
 
-**ChromaDB path:** set in Settings → MailMind → Chroma path. Default is `~/.openclaw/mailmind_chroma` (outside the project, no git tracking). Any writable absolute path works — point it at an existing folder and ChromaDB uses it as-is. Requires `pip install chromadb`; if not installed, all chroma calls fail silently and the rest of the app is unaffected.
+1. **Arrives** — fetched via IMAP, stored with a stable UID key
+2. **Open** — AI generates a 2-3 sentence summary (streaming, cached after first load)
+3. **Reply** — type your intent in the box, AI drafts the full reply, you review and send
+4. **Send** — fired via SMTP, email marked as read in the inbox
+5. Nothing else is stored. No conversation history, no ChromaDB.
+
+---
+
+## Flagged email flow — full conversation tracking
+
+Flagging an email opts it into a different, richer lifecycle. The intent is to track
+an ongoing conversation with that sender from start to finish.
+
+### The chain
+
+```
+Email arrives
+    │
+    ▼
+User flags it
+    │
+    ▼
+Conversation summary generates (streams in)
+  — covers all emails from that sender on that thread (up to 6)
+  — embedded into ChromaDB for reply-draft context
+    │
+    ▼
+User replies
+  ├─ intent typed → AI drafts → reviewed → sent via SMTP
+  ├─ sent reply logged in store (direction: "sent")
+  ├─ conversation summary invalidated
+  └─ summary immediately re-generates including the sent reply
+       — ChromaDB re-embedded with updated summary
+    │
+    ▼
+Sender replies back
+  ├─ fetch (manual or daemon) detects new email on the same thread
+  ├─ flagged email's summary invalidated
+  └─ background thread automatically re-summarises
+       — result saved before you even open the email
+       — ChromaDB re-embedded
+    │
+    ▼
+  ┌─ repeat until dismissed ─┐
+    │
+    ▼
+User dismisses
+  ├─ flagged email deleted from store
+  ├─ all sent reply records for this thread deleted
+  └─ ChromaDB embedding deleted
+     Clean slate — nothing left behind.
+```
+
+### Thread view
+
+When a flagged email is open, the detail panel shows:
+
+1. **Conversation** — AI summary of the full thread (both sides, auto-updating)
+2. **Thread · N messages** — the physical emails in chronological order, each collapsible:
+   - Incoming emails labelled with the sender name
+   - Your sent replies labelled "You" in amber
+3. **Draft reply / Flagged / Dismiss / Block** action buttons
+
+### Thread grouping
+
+A "thread" is defined as all emails sharing the same **sender address** and the same
+**base subject** (stripped of Re:/Fwd:/Fw: prefixes). This means a reply chain with
+`Re: Interested in your Professional Plan` is grouped with the original
+`Interested in your Professional Plan`.
+
+### Auto-refresh when daemon fetches
+
+The frontend polls daemon status every 15 seconds. When `last_check` changes (daemon
+ran a fetch), the email list is automatically refreshed. The refresh respects the
+active filter, so a filtered view stays filtered after a daemon-triggered update.
+
+### Background re-summarisation
+
+When the daemon (or a manual fetch) detects a new incoming email on a flagged thread,
+it does not just invalidate the summary and wait. It immediately spawns a background
+thread that re-runs the full conversation summarisation. By the time you open the
+email, the updated summary — including the sender's latest reply — is already there.
+
+The same background thread re-embeds the new summary into ChromaDB so that any reply
+draft you generate will have up-to-date context.
+
+### Sent reply recording (flagged emails only)
+
+When you send a reply to a flagged email:
+- The sent draft is stored as a `direction: "sent"` record in the email store
+- It is matched back to the thread via `related_sender_email` + `thread_subject`
+- It appears in the thread view (labelled "You") and is included in the conversation summary
+- It is **not** shown in the main inbox list — it exists only for conversation context
+
+Normal emails do not record sent replies.
+
+### ChromaDB path
+
+Set in Settings → MailMind → Chroma path. Default is `~/.openclaw/mailmind_chroma`
+(outside the project, no git tracking). Any writable absolute path works — point it
+at an existing folder and ChromaDB uses it as-is. Requires `pip install chromadb`;
+if not installed, all chroma calls fail silently and the rest of the app is unaffected.
 
 ### Stable email identity across restarts
 
-Emails are keyed by **IMAP UID** (not sequence number). UIDs are permanent within a mailbox — the same email has the same UID every time you reconnect. This means summaries, flags, and conversation state all survive backend restarts without re-fetching or re-summarising.
-
-Previously summarised emails load their cached summary instantly on reopen. The LLM is never called twice for the same email unless the summary is explicitly invalidated (flag toggle, new thread reply).
+Emails are keyed by **IMAP UID** (not sequence number). UIDs are permanent within a
+mailbox — the same email has the same UID every time you reconnect. This means
+summaries, flags, conversation state, and sent reply records all survive backend
+restarts without re-fetching or re-summarising.
 
 ### Sending replies
 
 After drafting a reply (intent → generate → review), clicking **Send reply**:
 - Sends via Gmail SMTP
-- Marks the email as read in the inbox (dimmed styling)
+- Marks the email as read in the inbox
 - Keeps the email in the inbox for reference
 - Shows "Sending…" on the button while in flight
 - On failure: shows a red error banner with the reason; panel stays open so you can retry or redraft
 
-### Auto-refresh when daemon fetches
-
-The frontend polls daemon status every 15 seconds. When `last_check` changes (daemon ran a fetch), the email list is automatically refreshed — new emails appear without any manual action. The refresh respects the active filter, so a filtered view stays filtered after a daemon-triggered update.
+---
 
 ## Adding a new module
 
@@ -291,20 +393,21 @@ Done. Shell renders the sidebar item, App routes to your component, Settings ren
 /api/providers/model                      POST: switch model for a provider
 /api/modules                              List registered modules
 /api/modules/mailmind/emails              GET: list (supports date_from, date_to, flagged_only)
-/api/modules/mailmind/emails/fetch        POST: manual inbox fetch
-/api/modules/mailmind/emails/{id}/summarise   POST: generate + cache AI summary
+/api/modules/mailmind/emails/fetch        POST: manual inbox fetch (ALL mail, 30 most recent)
+/api/modules/mailmind/emails/{id}/summarise       POST: generate + cache AI summary
+/api/modules/mailmind/emails/{id}/summarise/stream  POST: streaming summary (text/plain, token by token)
+/api/modules/mailmind/emails/{id}/thread  GET: full thread for a flagged email (incoming + sent replies)
 /api/modules/mailmind/emails/flag         POST: toggle flag
-/api/modules/mailmind/emails/dismiss      POST: remove from store
+/api/modules/mailmind/emails/dismiss      POST: remove from store (+ cleanup for flagged)
 /api/modules/mailmind/emails/{id}/block-sender  POST: block + remove
 /api/modules/mailmind/reply/draft         POST: generate reply draft
-/api/modules/mailmind/reply/send          POST: send via SMTP
+/api/modules/mailmind/reply/send          POST: send via SMTP (logs sent reply for flagged emails)
 /api/modules/mailmind/blocklist           GET / add / remove
 /api/modules/mailmind/daemon/status       GET: running, paused, last_check, next_check
 /api/modules/mailmind/daemon/start        POST: start background poller
 /api/modules/mailmind/daemon/pause        POST: pause (thread stays alive)
 /api/modules/mailmind/daemon/resume       POST: resume
 /api/modules/mailmind/daemon/stop         POST: stop thread
-/api/modules/mailmind/emails/{id}/summarise/stream  POST: streaming summary (text/plain, token by token)
 /api/modules/mailmind/settings            GET / POST: module settings (user_name, user_title, work_start, work_end, check_interval, chroma_path, system_prompt)
 ```
 
@@ -325,6 +428,6 @@ Retune the theme in one file.
 - **API keys** are Fernet-encrypted in `~/.openclaw/keys.enc`. Master key at `~/.openclaw/master.key` (chmod 600).
 - **Gmail credentials** are stored encrypted via the same Fernet store — not in plaintext. Any legacy `email_creds.json` is migrated and deleted on first run.
 - **CORS** is restricted to `localhost:5173`, `localhost:3000`, and `app://.` only.
-- **Prompt injection** is mitigated by wrapping all email content in `<email>` tags with an explicit instruction to treat it as data.
+- **Prompt injection** is mitigated by wrapping all email content in `<email>` or `<thread>` tags with an explicit instruction to treat it as data.
 - **chroma_path** is validated against system directories (`/etc`, `/sys`, `/proc`, etc.) before use.
 - Falls back to plaintext key storage + warning if `cryptography` isn't installed.
