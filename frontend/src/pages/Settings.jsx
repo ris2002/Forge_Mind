@@ -30,7 +30,7 @@ export default function Settings() {
         <div style={{
           fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-3)",
           letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 18,
-        }}>Configure OpenClaw-Py</div>
+        }}>Configure ForgeMind</div>
 
         <div style={{ display: "flex", gap: 2 }}>
           {tabs.map(t => (
@@ -135,7 +135,7 @@ function ProvidersTab() {
         fontSize: 12, color: "var(--text-2)", lineHeight: 1.7,
       }}>
         <div style={{ color: "var(--text-1)", fontWeight: 500, marginBottom: 4 }}>Privacy note</div>
-        OpenClaw-Py defaults to Ollama (local). Cloud providers only activate when you
+        ForgeMind defaults to Ollama (local). Cloud providers only activate when you
         explicitly select them. API keys are encrypted and stored locally in your workspace folder.
       </div>
 
@@ -256,13 +256,13 @@ function GeneralTab() {
     <div>
       <h3 style={sectionHeadingStyle}>About</h3>
       <p style={sectionSubStyle}>
-        OpenClaw-Py is a local-first AI workspace. Each module is self-contained —
+        ForgeMind is a local-first AI workspace. Each module is self-contained —
         add new ones in <code style={codeStyle}>frontend/src/modules/</code>.
       </p>
       <div style={{ marginTop: 20 }}>
         <div style={labelStyle}>Data directory</div>
         <code style={{ ...codeStyle, display: "inline-block", padding: "6px 10px" }}>
-          ~/Desktop/openclaw-py/
+          ~/Desktop/forgemind/
         </code>
       </div>
     </div>

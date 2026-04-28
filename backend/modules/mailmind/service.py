@@ -288,14 +288,15 @@ def summarise_stream(email_id: str):
             [
                 e for e in emails.values()
                 if (
-                    # Incoming: same sender + same thread
+                    # Incoming: same sender + same thread (skip compose anchors — empty body)
                     e.get("sender_email") == sender_email
                     and e.get(
                         "thread_subject",
                         parsing.normalize_subject(e.get("subject", "")),
                     ) == thread_subject
+                    and not e.get("composed_anchor")
                 ) or (
-                    # Outgoing: replies we sent in this thread
+                    # Outgoing: replies/drafts we sent in this thread
                     e.get("direction") == "sent"
                     and e.get("related_sender_email") == sender_email
                     and e.get("thread_subject") == thread_subject
@@ -370,6 +371,7 @@ def get_thread(email_id: str) -> list[dict]:
                 e.get("sender_email") == sender_email
                 and e.get("thread_subject", parsing.normalize_subject(e.get("subject", ""))) == thread_subject
                 and e.get("direction") != "sent"
+                and not e.get("composed_anchor")
             ) or (
                 e.get("direction") == "sent"
                 and e.get("related_sender_email") == sender_email
@@ -476,6 +478,101 @@ def block_sender(email_id: str) -> dict:
 # ─────────────────────────────────────────────────────────────
 # Reply
 # ─────────────────────────────────────────────────────────────
+def _extract_email(addr: str) -> str:
+    addr = addr.strip()
+    if "<" in addr and ">" in addr:
+        return addr.split("<")[-1].replace(">", "").strip().lower()
+    return addr.strip().lower()
+
+
+def _extract_display_name(addr: str) -> str:
+    addr = addr.strip()
+    if "<" in addr:
+        name = addr.split("<")[0].strip().strip('"').strip("'")
+        if name:
+            return name
+    local = addr.split("@")[0].split("<")[-1].strip()
+    return local.replace(".", " ").replace("_", " ").title()
+
+
+def draft_compose(to: str, cc: str, subject: str, user_intent: str, to_name: str = "") -> dict:
+    s = module_settings.load()
+    user_name = s.get("user_name", "User")
+    user_title = s.get("user_title", "Professional")
+    system_prompt = s.get("system_prompt", "")
+    display_name = to_name.strip() if to_name.strip() else _extract_display_name(to)
+    prompt = prompts.compose_prompt(
+        user_name=user_name,
+        user_title=user_title,
+        to_name=display_name,
+        subject=subject,
+        user_intent=user_intent,
+        system_prompt=system_prompt,
+    )
+    return {"draft": llm_generate(prompt)}
+
+
+def send_compose(to: str, cc: str, subject: str, draft: str, flag: bool = False, to_name: str = "") -> dict:
+    to_clean = _extract_email(to)
+    gmail.send_mail(to_addr=to, subject=subject, body=draft, cc=cc)
+
+    if not flag:
+        return {"sent": True, "flagged": False}
+
+    s = module_settings.load()
+    user_name = s.get("user_name", "User")
+    now = datetime.now()
+    thread_subject = parsing.normalize_subject(subject)
+    display_name = to_name.strip() if to_name.strip() else _extract_display_name(to)
+    to_first = display_name.split()[0] if display_name else (to_clean.split("@")[0] or "there")
+
+    emails = store.load_emails()
+    ts = int(now.timestamp())
+
+    # Anchor entry — represents the conversation with this contact in the inbox list.
+    # composed_anchor=True excludes it from thread view and conversation summary
+    # so only actual emails (sent draft + incoming replies) appear there.
+    anchor_id = f"composed_{ts}"
+    emails[anchor_id] = {
+        "id": anchor_id,
+        "sender": display_name,
+        "sender_first": to_first,
+        "sender_email": to_clean,
+        "subject": subject,
+        "thread_subject": thread_subject,
+        "summary": "",
+        "body": "",
+        "time": now.strftime("%H:%M"),
+        "time_raw": now.strftime("%a, %d %b %Y %H:%M:%S +0000"),
+        "read": True,
+        "flagged": True,
+        "summarised": False,
+        "composed_anchor": True,
+    }
+
+    # Sent draft — shows in thread view under the "You" label.
+    sent_id = f"sent_{anchor_id}"
+    emails[sent_id] = {
+        "id": sent_id,
+        "sender": f"You ({user_name})",
+        "sender_email": "",
+        "subject": subject,
+        "thread_subject": thread_subject,
+        "body": draft,
+        "time": now.strftime("%H:%M"),
+        "time_raw": now.strftime("%a, %d %b %Y %H:%M:%S +0000"),
+        "direction": "sent",
+        "related_sender_email": to_clean,
+        "read": True,
+        "flagged": False,
+        "summarised": True,
+        "summary": "",
+    }
+
+    store.save_emails(emails)
+    return {"sent": True, "flagged": True, "conversation_id": anchor_id}
+
+
 def draft_reply(email_id: str, user_intent: str) -> dict:
     emails = store.load_emails()
     data = emails.get(email_id)

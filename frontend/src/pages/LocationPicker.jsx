@@ -55,7 +55,7 @@ export default function LocationPicker({ onConfirmed }) {
         </h1>
 
         <p style={{ fontSize: 13, color: "var(--text-2)", lineHeight: 1.7, margin: 0, marginBottom: 28 }}>
-          OpenClaw-Py stores everything locally — your emails, AI summaries, encryption
+          ForgeMind stores everything locally — your emails, AI summaries, encryption
           keys, and settings. Nothing leaves your machine. We need one folder to put
           it all in.
         </p>

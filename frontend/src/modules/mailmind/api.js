@@ -41,6 +41,10 @@ export const mailmindApi = {
   dismiss:        (id) => post(`${BASE}/emails/dismiss`, { email_id: id }),
   blockSender:    (id) => post(`${BASE}/emails/${id}/block-sender`),
 
+  // compose (new outgoing email)
+  draftCompose:   (to, toName, cc, subject, intent) => post(`${BASE}/compose/draft`, { to, to_name: toName, cc, subject, user_intent: intent }),
+  sendCompose:    (to, toName, cc, subject, draft, flag) => post(`${BASE}/compose/send`, { to, to_name: toName, cc, subject, draft, flag }),
+
   // reply
   draftReply:     (id, intent) => post(`${BASE}/reply/draft`, { email_id: id, user_intent: intent }),
   sendReply:      (id, draft) => post(`${BASE}/reply/send`, { email_id: id, draft }),

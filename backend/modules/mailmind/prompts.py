@@ -47,6 +47,28 @@ Write a 3-4 sentence summary of this conversation:
 Summary:"""
 
 
+def compose_prompt(
+    user_name: str,
+    user_title: str,
+    to_name: str,
+    subject: str,
+    user_intent: str,
+    system_prompt: str = "",
+) -> str:
+    system_block = f"\n\nAdditional instructions:\n{system_prompt.strip()}" if system_prompt.strip() else ""
+    return f"""You are {user_name}, {user_title}.
+Write a professional email to {to_name}.
+Never use placeholders like [Name] or [Company].{system_block}
+
+Subject: {subject}
+Your key points: {user_intent}
+
+Start with: Hi {to_name},
+End with: Best regards, {user_name}
+
+Email:"""
+
+
 def reply_prompt(
     user_name: str,
     user_title: str,

@@ -1,4 +1,4 @@
-# OpenClaw-Py — Setup & Usage Instructions
+# ForgeMind — Setup & Usage Instructions
 
 ## Table of Contents
 
@@ -32,13 +32,13 @@ Before starting, make sure you have the following installed:
 
 ## Google Cloud Console Setup
 
-OpenClaw-Py uses the Gmail REST API to read and send emails. You must create your own Google Cloud project and OAuth2 credentials. This is a one-time setup.
+ForgeMind uses the Gmail REST API to read and send emails. You must create your own Google Cloud project and OAuth2 credentials. This is a one-time setup.
 
 ### Step 1 — Create a Google Cloud Project
 
 1. Go to [https://console.cloud.google.com](https://console.cloud.google.com)
 2. Click the project dropdown at the top left → **New Project**
-3. Give it a name (e.g. `OpenClaw-Py`) and click **Create**
+3. Give it a name (e.g. `ForgeMind`) and click **Create**
 4. Make sure your new project is selected in the top bar
 
 ### Step 2 — Enable the Gmail API
@@ -53,7 +53,7 @@ OpenClaw-Py uses the Gmail REST API to read and send emails. You must create you
 1. Go to **APIs & Services → OAuth consent screen**
 2. Choose **External** and click **Create**
 3. Fill in:
-   - **App name**: OpenClaw-Py (or anything you like)
+   - **App name**: ForgeMind (or anything you like)
    - **User support email**: your Gmail address
    - **Developer contact email**: your Gmail address
 4. Click **Save and Continue** through the remaining steps (you don't need to add scopes manually here)
@@ -67,7 +67,7 @@ OpenClaw-Py uses the Gmail REST API to read and send emails. You must create you
 1. Go to **APIs & Services → Credentials**
 2. Click **+ Create Credentials → OAuth client ID**
 3. Choose **Desktop app** as the application type
-4. Name it anything (e.g. `OpenClaw-Py Desktop`) and click **Create**
+4. Name it anything (e.g. `ForgeMind Desktop`) and click **Create**
 5. A dialog appears — click **Download JSON**
 6. Rename the downloaded file to exactly: `client_secret.json`
 
@@ -75,10 +75,10 @@ OpenClaw-Py uses the Gmail REST API to read and send emails. You must create you
 
 > You will do this **after** the first run (when the workspace folder is created). Come back here after completing [First Run](#first-run--choosing-a-workspace).
 
-Copy `client_secret.json` into your workspace folder (default: `~/Desktop/openclaw-py/`):
+Copy `client_secret.json` into your workspace folder (default: `~/Desktop/forgemind/`):
 
 ```
-~/Desktop/openclaw-py/client_secret.json
+~/Desktop/forgemind/client_secret.json
 ```
 
 The backend looks for it there automatically. It is never committed to git.
@@ -156,8 +156,8 @@ Open your browser and go to: **http://localhost:5173**
 
 The very first time you open the app you will see the **workspace picker** screen.
 
-1. OpenClaw-Py asks where to store all local data (emails, summaries, encryption keys, settings, ChromaDB embeddings)
-2. The default path is shown: `~/Desktop/openclaw-py`
+1. ForgeMind asks where to store all local data (emails, summaries, encryption keys, settings, ChromaDB embeddings)
+2. The default path is shown: `~/Desktop/forgemind`
 3. You can type any absolute path instead, or leave it as-is
 4. Click **Create my workspace →**
 5. The folder is created automatically
@@ -176,18 +176,18 @@ The app opens a Google OAuth page in your browser.
 
 ### Step 2 — Choose your Google account
 
-Select the Gmail account you want to use with OpenClaw-Py. This must be one of the **test users** you added in the OAuth consent screen setup.
+Select the Gmail account you want to use with ForgeMind. This must be one of the **test users** you added in the OAuth consent screen setup.
 
 ### Step 3 — Grant permissions
 
 Google will ask if you trust this app. Click **Continue** (you may see a warning because the app is in Testing mode — this is normal).
 
 The permission requested is: `https://www.googleapis.com/auth/gmail.modify`  
-This lets OpenClaw-Py read and send email on your behalf.
+This lets ForgeMind read and send email on your behalf.
 
 ### Step 4 — Callback
 
-The browser will show a success page: **"Connected! You can close this tab and return to OpenClaw-Py."**  
+The browser will show a success page: **"Connected! You can close this tab and return to ForgeMind."**  
 The tab closes automatically after 1.5 seconds.
 
 ### Step 5 — Return to the app
@@ -202,7 +202,7 @@ Switch back to the app at `http://localhost:5173`. It now shows the main shell w
 
 ## Choosing an AI Provider
 
-OpenClaw-Py supports four AI providers. You configure them in **Settings** (gear icon in the bottom-left sidebar).
+ForgeMind supports four AI providers. You configure them in **Settings** (gear icon in the bottom-left sidebar).
 
 ### Option A — Ollama (local, free, default)
 
@@ -317,10 +317,10 @@ Switch between Ollama, Claude, OpenAI, and Gemini. Save API keys (stored encrypt
 
 ## Data & Security
 
-All data is stored in your chosen workspace folder (default: `~/Desktop/openclaw-py/`).
+All data is stored in your chosen workspace folder (default: `~/Desktop/forgemind/`).
 
 ```
-openclaw-py/
+forgemind/
 ├── client_secret.json      ← your Google OAuth credentials (you place this)
 ├── keys.enc                ← Fernet-encrypted API keys
 ├── master.key              ← encryption master key (never share this)
@@ -336,7 +336,7 @@ openclaw-py/
 - **Gmail OAuth tokens** are encrypted the same way via `keys.enc`
 - **Nothing is sent to any external server** except the AI provider you choose and Gmail's own API
 - **Delete the workspace folder** to fully reset the app (you will go through first-run again)
-- A tiny bootstrap file at `~/.openclaw-py-location` records which folder you chose — delete it along with the workspace to reset completely
+- A tiny bootstrap file at `~/.forgemind-location` records which folder you chose — delete it along with the workspace to reset completely
 
 ---
 
@@ -358,7 +358,7 @@ openclaw-py/
 ### "client_secret.json not found"
 - Make sure you downloaded OAuth credentials (Desktop app type) from Google Cloud Console
 - Rename the file to exactly `client_secret.json`
-- Place it in your workspace folder (e.g. `~/Desktop/openclaw-py/client_secret.json`)
+- Place it in your workspace folder (e.g. `~/Desktop/forgemind/client_secret.json`)
 
 ### Ollama "not reachable"
 - Run `ollama serve` in a separate terminal

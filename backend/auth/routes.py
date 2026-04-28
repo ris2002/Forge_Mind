@@ -34,7 +34,7 @@ def gmail_callback(code: str = "", error: str = ""):
         gmail.handle_callback(code)
     except Exception as e:
         return HTMLResponse(_page("Connection failed", str(e), ok=False))
-    return HTMLResponse(_page("Connected!", "You can close this tab and return to OpenClaw-Py.", ok=True))
+    return HTMLResponse(_page("Connected!", "You can close this tab and return to ForgeMind.", ok=True))
 
 
 @router.post("/signout")
@@ -48,7 +48,7 @@ def _page(title: str, body: str, ok: bool) -> str:
     script = "<script>setTimeout(() => window.close(), 1500)</script>" if ok else ""
     return f"""<!DOCTYPE html>
 <html>
-<head><title>OpenClaw-Py · Gmail</title></head>
+<head><title>ForgeMind · Gmail</title></head>
 <body style="font-family:system-ui,sans-serif;background:#111;color:#eee;
              display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0">
   <div style="text-align:center;padding:40px">

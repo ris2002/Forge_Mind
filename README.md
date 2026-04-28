@@ -1,6 +1,6 @@
-# OpenClaw-Py
+# ForgeMind
 
-**OpenClaw-Py is a local-first AI workspace — a platform, not a single feature.**
+**ForgeMind is a local-first AI workspace — a platform, not a single feature.**
 
 The idea is simple: your AI tools should run on your machine, store nothing in the cloud, and be composable. Every capability lives in a self-contained **module**. The core (auth, providers, settings, encryption) is shared. Modules plug in without touching the core.
 
@@ -8,12 +8,12 @@ The idea is simple: your AI tools should run on your machine, store nothing in t
 
 ---
 
-## What OpenClaw-Py is
+## What ForgeMind is
 
 | Layer | What it does |
 |---|---|
 | **Platform core** | Gmail OAuth2, LLM provider switching (Ollama / Claude / OpenAI / Gemini), encrypted secret storage, module registry, settings |
-| **MailMind** | Inbox triage — fetch, summarise, flag conversations, draft replies, block senders |
+| **MailMind** | Inbox triage — fetch, summarise, flag conversations, draft replies, compose outgoing emails, block senders |
 | **Future modules** | Anything. The architecture is designed so you add a folder and register it — the shell, sidebar, settings, and API surface are all module-agnostic |
 
 ---
@@ -35,7 +35,7 @@ npm run dev
 
 Open `http://localhost:5173`.
 
-On first run the app will ask where to store your workspace (default: `~/Desktop/openclaw-py/`).
+On first run the app will ask where to store your workspace (default: `~/Desktop/forgemind/`).
 Place your `client_secret.json` from Google Cloud Console in that folder before signing in.
 
 See **INSTRUCTIONS.md** for full setup including Google Cloud Console steps.
@@ -108,7 +108,7 @@ modules/
 
 ## MailMind — Module 1
 
-MailMind is an inbox triage tool. It is **one feature of OpenClaw-Py**, not the whole app. It demonstrates what a module looks like — it has its own routes, service layer, settings, store, and UI component. Any future module follows the same pattern.
+MailMind is an inbox triage tool. It is **one feature of ForgeMind**, not the whole app. It demonstrates what a module looks like — it has its own routes, service layer, settings, store, and UI component. Any future module follows the same pattern.
 
 ### Inbox fetch
 
@@ -117,6 +117,12 @@ Emails are fetched via the **Gmail REST API** (not IMAP). Each email is identifi
 Every fetch pulls up to 50 inbox messages. When a date range filter is active, the Gmail `after:`/`before:` query terms are applied server-side so only that window is retrieved.
 
 Promotional emails (matched by keyword patterns on sender/subject) and blocked senders are silently skipped before storing.
+
+### Date range filter
+
+The filter panel (top of the email list) accepts a From / To date range and a "Flagged only" toggle. When a date range is set and the user clicks **Filter**, the frontend first calls `POST /emails/fetch?date_from=…&date_to=…` to pull that window directly from Gmail (server-side `after:`/`before:` query), then merges results into the local store, then applies the local filter. A spinner labelled "Fetching from Gmail…" is shown while the Gmail fetch is in progress.
+
+This means past emails that were never cached locally are retrieved correctly instead of returning an empty list.
 
 ### Real-time daemon (Gmail History API)
 
@@ -130,6 +136,7 @@ This means new emails appear in the app within ~60 seconds of landing in your in
 - **Resume auto** — picks up on the next 60-second tick
 - **Stop auto** — thread exits cleanly
 - **Check inbox** — manual fetch, always available regardless of daemon state
+- **Compose** — compose a new email to any recipient (AI drafts from your intent; optional conversation flag)
 
 **Work hours** (set in Settings → MailMind): history checks are skipped outside these hours.
 
@@ -140,6 +147,18 @@ Summaries are generated on demand when you open an email — lazy, never charged
 Summaries stream token by token so text appears immediately. The store is `FileLock`-protected and written back with a fresh read after generation, so opening two emails simultaneously is safe.
 
 If the LLM returns nothing (model not loaded, Ollama down) the backend falls back to a plain-text excerpt from the email body — the user always sees something.
+
+### Compose (new outgoing email)
+
+Click **Compose** in the header to write a brand-new email to anyone.
+
+**Fields:** To (email address), Their name (used in the AI draft — avoids "Hi rb123@gmail"), CC (optional), Subject, and your intent in plain words.
+
+The AI drafts the full email from your intent. You review and edit before sending.
+
+**Flag conversation** checkbox: if ticked, a conversation entry is created in the inbox under the recipient's name. The sent draft is stored as the opening message. When they reply, the incoming email matches by `(sender_email, thread_subject)` — the existing flag architecture kicks in automatically: the conversation summary regenerates, ChromaDB re-embeds, and the thread view shows the full exchange.
+
+The recipient name field is required to prevent the AI from using garbled names extracted from email addresses (e.g. "Hi rb123" from `rb123@gmail.com`).
 
 ### Reply instructions (system prompt)
 
@@ -206,7 +225,7 @@ User dismisses
 
 When a flagged email is open, the detail panel shows:
 
-1. **Conversation** — AI summary of the full thread (both sides, auto-updating)
+1. **Conversation** — AI summary of the full thread (both sides, auto-updating). A **Refresh** button re-fetches the thread and re-generates the summary on demand.
 2. **Thread · N messages** — the physical emails in chronological order, each collapsible
    - Incoming emails labelled with the sender name
    - Your sent replies labelled "You" in amber
@@ -222,6 +241,10 @@ When a new email arrives on a flagged thread, a background daemon thread immedia
 
 If multiple new emails arrive in the same thread simultaneously, only one re-summarisation thread is spawned (deduplicated by a set before dispatch).
 
+**UI auto-update:** the frontend polls `daemon/status` every 15 seconds. When `last_check` advances, it re-fetches the email list and applies a three-way merge: if the backend has a newer non-empty summary (background re-summarise finished), it overwrites the local cached version. The open email's summary and thread list are both updated in place — no navigation required.
+
+**Manual refresh:** a **Refresh** button is always visible in the Conversation header for flagged emails. It re-fetches the thread and forces a fresh summarise stream, bypassing the local cache.
+
 ### Dismiss behaviour
 
 | Email type | Dismiss does |
@@ -234,6 +257,15 @@ If multiple new emails arrive in the same thread simultaneously, only one re-sum
 When you send a reply to a flagged email the sent draft is stored as a `direction: "sent"` record matched back via `related_sender_email` + `thread_subject`. It appears in the thread view and is included in the conversation summary. It is not shown in the main inbox list.
 
 Normal emails do not record sent replies.
+
+### Block sender
+
+Blocking a sender does the following atomically:
+
+- Adds their email address to the blocklist (future fetches skip them silently)
+- Removes **every** email from that sender across **all threads** from the local store (not just the clicked one)
+- Deletes all ChromaDB embeddings for their flagged threads
+- Removes all `direction: "sent"` reply records addressed to them
 
 ### ChromaDB
 
@@ -360,6 +392,8 @@ Done. The shell renders the sidebar item, App routes to your component, Settings
 /api/modules/mailmind/emails/{id}/block-sender  POST: block sender + remove all their emails
 /api/modules/mailmind/reply/draft           POST: generate reply draft
 /api/modules/mailmind/reply/send            POST: send via Gmail API
+/api/modules/mailmind/compose/draft         POST: draft a new outgoing email (to, to_name, cc, subject, user_intent)
+/api/modules/mailmind/compose/send          POST: send composed email + optionally flag conversation
 /api/modules/mailmind/blocklist             GET / add / remove
 /api/modules/mailmind/daemon/status         GET: running, paused, last_check
 /api/modules/mailmind/daemon/start          POST
@@ -383,13 +417,36 @@ Retune the whole theme in one file.
 
 ---
 
+## Key fixes
+
+Issues resolved during active development — documented here so they don't regress.
+
+| # | Area | Fix |
+|---|------|-----|
+| 1 | **OAuth2 PKCE** | `get_auth_url()` and `handle_callback()` must share the same `Flow` object because `flow.fetch_token()` needs the `code_verifier` that was generated in `authorization_url()`. Fixed by storing the flow in a module-level `_pending_flow` variable between the two calls. Without this: `invalid_grant: Missing code verifier`. |
+| 2 | **Date filter returning empty** | The local cache only held recently fetched emails. Choosing a past date range returned nothing. Fix: the Filter button now triggers a targeted `POST /emails/fetch?date_from=…&date_to=…` against Gmail before applying the local filter, and shows a loading indicator during the Gmail fetch. |
+| 3 | **Daemon real-time** | The old daemon polled the full inbox on a configurable timer. Replaced with Gmail History API: checks `users.history.list` every 60 seconds with the stored `historyId` — Gmail returns only changes. Full fetch only runs when new messages are confirmed. Near-zero cost when inbox is quiet. |
+| 4 | **Duplicate background threads** | `_invalidate_stale_thread_summaries` used a list, so the same flagged email ID could be queued for re-summarisation multiple times if several new thread emails arrived at once. Fixed by using a set for deduplication. |
+| 5 | **Block sender incomplete** | Blocking only removed the single clicked email. Fix: removes every email from that sender across all threads, plus all `direction: "sent"` reply records addressed to them. |
+| 6 | **Dismiss too aggressive** | Dismiss on a flagged email was deleting all thread emails. Correct behaviour: only delete the ChromaDB embedding and unflag — the email and conversation history stay in the inbox. Dismiss on a normal (unflagged) email still removes it entirely. Frontend detects `{ kept: true }` in the response and updates state accordingly. |
+| 7 | **Flagged summary not auto-updating** | `mergeEmails` always preferred the local cached summary over any backend update, so background re-summarisation results never appeared until you navigated away. Fix: if the backend returns a non-empty summary that differs from the local one, trust it. `refreshStatus` now also calls `setSelectedEmail` and `getThread` to push updates into the open panel without navigation. |
+| 8 | **Compose name mangling** | `_extract_display_name` fell back to the email local part (`rb123` from `rb123@gmail.com`), causing the AI to open drafts with "Hi rb123". Fix: the compose form requires an explicit "Their name" field; this value is passed to the prompt directly, bypassing all name inference. |
+
+---
+
 ## Privacy & security
 
 - **Ollama is default.** With it installed and running, no prompts ever leave your machine.
 - **Cloud providers** activate only when explicitly selected and a valid key is saved.
 - **API keys** are Fernet-encrypted in `[workspace]/keys.enc`. Master key at `[workspace]/master.key` (chmod 600).
 - **Gmail OAuth token** is stored encrypted via the same Fernet store — never in plaintext.
-- **Workspace location** is recorded in `~/.openclaw-py-location` (a single line). That is the only file OpenClaw-Py writes outside the workspace folder.
+- **Workspace location** is recorded in `~/.forgemind-location` (a single line). That is the only file ForgeMind writes outside the workspace folder.
 - **CORS** is restricted to `localhost:5173`, `localhost:3000`, and `app://.` only.
 - **Prompt injection** is mitigated by wrapping all email content in `<email>` or `<thread>` tags with an explicit instruction to treat content as data, not instructions.
 - **chroma_path** is validated against system directories before use.
+
+---
+
+## Working Video
+
+https://drive.google.com/file/d/1aNmTD7SAFlHzzMA_dElX8JbRfASWGSp8/view?usp=sharing

@@ -13,6 +13,12 @@ const IC = {
   refresh: "M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15",
   block:   "M18.364 18.364A9 9 0 0 0 5.636 5.636m12.728 12.728A9 9 0 0 1 5.636 5.636m12.728 12.728L5.636 5.636",
   star:    "M12 2l3 7 7 .7-5.3 4.8L18 22l-6-3.5L6 22l1.3-7.5L2 9.7 9 9z",
+  compose: "M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z",
+};
+
+const composeLabelStyle = {
+  fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-3)",
+  letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6,
 };
 
 const Skeleton = ({ width = "100%", height = 10 }) => (
@@ -44,9 +50,15 @@ export default function MailMind() {
   const [flaggedOnly, setFlaggedOnly] = useState(false);
   const [filtering, setFiltering] = useState(false);
   const [fetchingDates, setFetchingDates] = useState(false);
+  const [composePanel, setComposePanel] = useState(null);
+  const [composeDraftLoading, setComposeDraftLoading] = useState(false);
+  const [composeSending, setComposeSending] = useState(false);
+  const [refreshingFlagged, setRefreshingFlagged] = useState(false);
 
   const lastCheckRef = useRef("—");
   const filterRef   = useRef({ dateFrom: "", dateTo: "", flaggedOnly: false });
+  const selectedEmailRef = useRef(null);
+  selectedEmailRef.current = selectedEmail; // keep ref current for async callbacks
 
   const mergeEmails = (fresh, prev) => {
     const prevMap = {};
@@ -54,14 +66,15 @@ export default function MailMind() {
     return fresh.map(e => {
       const old = prevMap[e.id];
       if (!old) return e;
-      // If backend explicitly reset summarised (thread has new replies), trust the backend.
-      // Otherwise keep richer local state so mid-stream summaries aren't wiped.
       const backendReset = !e.summarised && !e.summary;
+      // If backend has a fresh non-empty summary that differs from our local one, trust it
+      // (covers background re-summarise of flagged threads after new emails arrive)
+      const backendHasNew = e.summarised && e.summary && e.summary !== old.summary;
       return {
         ...e,
         flagged:    old.flagged ?? e.flagged,
-        summarised: backendReset ? false : (old.summarised || e.summarised),
-        summary:    backendReset ? ""    : (old.summary    || e.summary),
+        summarised: backendReset ? false : (backendHasNew ? true  : (old.summarised || e.summarised)),
+        summary:    backendReset ? ""    : (backendHasNew ? e.summary : (old.summary || e.summary)),
       };
     });
   };
@@ -76,7 +89,25 @@ export default function MailMind() {
         const fresh = await (df || dt || fo
           ? mailmindApi.listFiltered(df, dt, fo)
           : mailmindApi.list());
-        if (Array.isArray(fresh)) setEmails(prev => mergeEmails(fresh, prev));
+        if (Array.isArray(fresh)) {
+          setEmails(prev => mergeEmails(fresh, prev));
+          // Sync the open email's summary if backend updated it
+          setSelectedEmail(sel => {
+            if (!sel) return sel;
+            const fe = fresh.find(e => e.id === sel.id);
+            if (!fe) return sel;
+            const backendReset = !fe.summarised && !fe.summary;
+            if (backendReset) return { ...sel, summarised: false, summary: "" };
+            if (fe.summarised && fe.summary && fe.summary !== sel.summary)
+              return { ...sel, summary: fe.summary, summarised: true };
+            return sel;
+          });
+          // Refresh thread for open flagged conversation
+          const sel = selectedEmailRef.current;
+          if (sel?.flagged) {
+            mailmindApi.getThread(sel.id).then(t => setThread(Array.isArray(t) ? t : [])).catch(() => {});
+          }
+        }
       }
     } catch {}
   };
@@ -95,6 +126,7 @@ export default function MailMind() {
 
   const handleSelectEmail = async (email) => {
     setReplyPanel(null);
+    setComposePanel(null);
     setSummariseFailed(false);
     setRetryCount(0);
     setThread([]);
@@ -255,6 +287,48 @@ export default function MailMind() {
     setSending(false);
   };
 
+  const handleRefreshFlagged = async () => {
+    if (!selectedEmail?.flagged) return;
+    setRefreshingFlagged(true);
+    mailmindApi.getThread(selectedEmail.id).then(t => setThread(Array.isArray(t) ? t : [])).catch(() => {});
+    await _runSummarise({ ...selectedEmail, summarised: false });
+    setRefreshingFlagged(false);
+  };
+
+  const handleComposeOpen = () => {
+    setReplyPanel(null);
+    setSelectedEmail(null);
+    setComposePanel({ to: "", toName: "", cc: "", subject: "", intent: "", draft: "", flag: false, stage: "fields", error: "", sendError: "" });
+  };
+
+  const handleComposeDraft = async () => {
+    setComposeDraftLoading(true);
+    setComposePanel(p => ({ ...p, error: "" }));
+    try {
+      const res = await mailmindApi.draftCompose(composePanel.to, composePanel.toName, composePanel.cc, composePanel.subject, composePanel.intent);
+      setComposePanel(p => ({ ...p, draft: res.draft, stage: "review" }));
+    } catch {
+      setComposePanel(p => ({ ...p, error: "Failed to generate draft — check your LLM provider is running." }));
+    }
+    setComposeDraftLoading(false);
+  };
+
+  const handleComposeSend = async () => {
+    setComposeSending(true);
+    setComposePanel(p => ({ ...p, sendError: "" }));
+    try {
+      const res = await mailmindApi.sendCompose(composePanel.to, composePanel.toName, composePanel.cc, composePanel.subject, composePanel.draft, composePanel.flag);
+      setComposePanel(null);
+      if (res?.flagged) {
+        const fresh = await mailmindApi.list().catch(() => []);
+        setEmails(Array.isArray(fresh) ? fresh : []);
+      }
+    } catch (e) {
+      setComposePanel(p => ({ ...p, sendError: e.message || "Failed to send — check your Gmail connection." }));
+    }
+    setComposeSending(false);
+  };
+
   const handleFilter = async () => {
     setFiltering(true);
     filterRef.current = { dateFrom, dateTo, flaggedOnly };
@@ -362,6 +436,12 @@ export default function MailMind() {
             {daemonLoading ? "Starting…" : "Start auto"}
           </button>
         )}
+
+        {/* Compose new email */}
+        <button className="oc-btn" onClick={handleComposeOpen}
+          style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", fontSize: 12 }}>
+          <Ic d={IC.compose} size={12} /> Compose
+        </button>
 
         {/* Manual fetch — always available */}
         <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
@@ -482,7 +562,105 @@ export default function MailMind() {
 
         {/* Detail */}
         <div style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
-          {selectedEmail && !replyPanel ? (
+          {composePanel ? (
+            <div style={{ flex: 1, overflowY: "auto", padding: "32px 40px", animation: "oc-fadein 0.2s ease" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 24 }}>
+                <button onClick={() => setComposePanel(null)}
+                  style={{ background: "transparent", border: "none", cursor: "pointer", color: "var(--text-2)", display: "flex", padding: 4 }}>
+                  <Ic d={IC.x} size={14} />
+                </button>
+                <h3 style={{ fontFamily: "var(--font-display)", fontWeight: 500, fontSize: 18, color: "var(--text-0)", margin: 0 }}>
+                  New message
+                </h3>
+              </div>
+
+              {composePanel.stage === "fields" ? (
+                <div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 18 }}>
+                    <div>
+                      <div style={composeLabelStyle}>To *</div>
+                      <input type="text" value={composePanel.to}
+                        onChange={e => setComposePanel(p => ({ ...p, to: e.target.value }))}
+                        placeholder="recipient@example.com" className="oc-input" />
+                    </div>
+                    <div>
+                      <div style={composeLabelStyle}>Their name *</div>
+                      <input type="text" value={composePanel.toName}
+                        onChange={e => setComposePanel(p => ({ ...p, toName: e.target.value }))}
+                        placeholder="e.g. John" className="oc-input" />
+                    </div>
+                    <div>
+                      <div style={composeLabelStyle}>CC</div>
+                      <input type="text" value={composePanel.cc}
+                        onChange={e => setComposePanel(p => ({ ...p, cc: e.target.value }))}
+                        placeholder="Optional" className="oc-input" />
+                    </div>
+                    <div>
+                      <div style={composeLabelStyle}>Subject *</div>
+                      <input type="text" value={composePanel.subject}
+                        onChange={e => setComposePanel(p => ({ ...p, subject: e.target.value }))}
+                        placeholder="What's this email about?" className="oc-input" />
+                    </div>
+                  </div>
+                  <p style={{ fontSize: 13, color: "var(--text-2)", lineHeight: 1.6, margin: 0, marginBottom: 10 }}>
+                    What do you want to say? Keep it rough — the AI writes the full email.
+                  </p>
+                  <textarea value={composePanel.intent}
+                    onChange={e => setComposePanel(p => ({ ...p, intent: e.target.value }))}
+                    placeholder="e.g. Introduce myself and ask for a 30-min call next week"
+                    rows={5} className="oc-input"
+                    style={{ resize: "vertical", lineHeight: 1.6, marginBottom: 14, fontSize: 13 }} />
+                  {composePanel.error && (
+                    <p style={{ fontSize: 12, color: "var(--danger)", marginBottom: 10, padding: "8px 12px", background: "rgba(201,112,100,0.08)", borderRadius: "var(--r-sm)", border: "1px solid rgba(201,112,100,0.25)" }}>
+                      {composePanel.error}
+                    </p>
+                  )}
+                  <button className="oc-btn oc-btn--primary" onClick={handleComposeDraft}
+                    disabled={!composePanel.to || !composePanel.toName || !composePanel.subject || !composePanel.intent || composeDraftLoading}
+                    style={{ width: "100%", padding: 11 }}>
+                    {composeDraftLoading ? "Drafting…" : "Generate draft →"}
+                  </button>
+                </div>
+              ) : (
+                <div>
+                  <div style={{ marginBottom: 10, fontSize: 12, color: "var(--text-2)" }}>
+                    <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.08em" }}>To: </span>
+                    {composePanel.to}
+                    {composePanel.cc && <><span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.08em" }}> · CC: </span>{composePanel.cc}</>}
+                  </div>
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-3)", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 8 }}>
+                    Review and edit before sending
+                  </div>
+                  <textarea value={composePanel.draft}
+                    onChange={e => setComposePanel(p => ({ ...p, draft: e.target.value }))}
+                    rows={12} className="oc-input"
+                    style={{ resize: "vertical", lineHeight: 1.7, marginBottom: 12, fontSize: 13 }} />
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, cursor: "pointer", fontSize: 13, color: "var(--text-1)" }}>
+                    <input type="checkbox" checked={composePanel.flag}
+                      onChange={e => setComposePanel(p => ({ ...p, flag: e.target.checked }))}
+                      style={{ accentColor: "var(--accent)", width: 14, height: 14 }} />
+                    <Ic d={IC.star} size={12} />
+                    Flag conversation
+                    <span style={{ fontSize: 11, color: "var(--text-3)" }}>— track replies + auto-summarise</span>
+                  </label>
+                  {composePanel.sendError && (
+                    <p style={{ fontSize: 12, color: "var(--danger)", marginBottom: 10, padding: "8px 12px", background: "rgba(201,112,100,0.08)", borderRadius: "var(--r-sm)", border: "1px solid rgba(201,112,100,0.25)" }}>
+                      {composePanel.sendError}
+                    </p>
+                  )}
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button className="oc-btn oc-btn--primary" onClick={handleComposeSend}
+                      disabled={composeSending}
+                      style={{ flex: 2, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: 11 }}>
+                      <Ic d={IC.send} size={12} /> {composeSending ? "Sending…" : "Send"}
+                    </button>
+                    <button className="oc-btn" onClick={() => setComposePanel(p => ({ ...p, stage: "fields", sendError: "" }))}
+                      style={{ flex: 1, padding: 11 }}>Redraft</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : selectedEmail && !replyPanel ? (
             <div style={{ flex: 1, overflowY: "auto", padding: "32px 40px", animation: "oc-fadein 0.2s ease" }}>
               <h2 style={{
                 fontFamily: "var(--font-display)", fontWeight: 500, fontSize: 22,
@@ -533,6 +711,18 @@ export default function MailMind() {
                         color: "var(--text-2)", cursor: "pointer",
                       }}>
                       <Ic d={IC.refresh} size={10} /> {retryCount > 0 ? `Retry (${retryCount + 1})` : "Retry"}
+                    </button>
+                  )}
+                  {selectedEmail?.flagged && !summarising && (
+                    <button onClick={handleRefreshFlagged} disabled={refreshingFlagged}
+                      style={{
+                        display: "flex", alignItems: "center", gap: 4,
+                        background: "transparent", border: "1px solid var(--border)",
+                        borderRadius: "var(--r-sm)", padding: "3px 8px",
+                        fontSize: 10, fontFamily: "var(--font-mono)",
+                        color: "var(--text-2)", cursor: "pointer", opacity: refreshingFlagged ? 0.5 : 1,
+                      }}>
+                      <Ic d={IC.refresh} size={10} /> {refreshingFlagged ? "…" : "Refresh"}
                     </button>
                   )}
                 </div>

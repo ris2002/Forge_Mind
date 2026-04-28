@@ -38,6 +38,23 @@ class BlocklistEntryIn(BaseModel):
     entry: str
 
 
+class ComposeDraftIn(BaseModel):
+    to: str
+    to_name: str = ""
+    cc: str = ""
+    subject: str
+    user_intent: str
+
+
+class ComposeSendIn(BaseModel):
+    to: str
+    to_name: str = ""
+    cc: str = ""
+    subject: str
+    draft: str
+    flag: bool = False
+
+
 class ModuleSettingsIn(BaseModel):
     user_name: Optional[str] = None
     user_title: Optional[str] = None
@@ -132,6 +149,20 @@ def send_reply(body: ReplySendIn):
         return service.send_reply(body.email_id, body.draft)
     except LookupError:
         raise HTTPException(status_code=404, detail="Email not found")
+    except RuntimeError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+
+# ── compose ─────────────────────────────────────────────────
+@router.post("/compose/draft")
+def compose_draft_route(body: ComposeDraftIn):
+    return service.draft_compose(body.to, body.cc, body.subject, body.user_intent, body.to_name)
+
+
+@router.post("/compose/send")
+def compose_send_route(body: ComposeSendIn):
+    try:
+        return service.send_compose(body.to, body.cc, body.subject, body.draft, body.flag, body.to_name)
     except RuntimeError as e:
         raise HTTPException(status_code=401, detail=str(e))
 

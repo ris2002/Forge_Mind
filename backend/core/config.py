@@ -2,12 +2,12 @@
 
 from pathlib import Path
 
-APP_NAME = "OpenClaw-Py"
+APP_NAME = "ForgeMind"
 APP_VERSION = "0.2.0"
 
 # Tiny bootstrap file in home dir — stores the chosen data directory path.
-# This is the ONLY file OpenClaw-Py ever writes to the home dir directly.
-_BOOTSTRAP = Path.home() / ".openclaw-py-location"
+# This is the ONLY file ForgeMind ever writes to the home dir directly.
+_BOOTSTRAP = Path.home() / ".forgemind-location"
 
 CORS_ORIGINS = [
     "http://localhost:5173",
@@ -19,7 +19,7 @@ CORS_ORIGINS = [
 def default_data_dir() -> Path:
     """Desktop/openclaw-py on any OS, falling back to home if Desktop doesn't exist."""
     desktop = Path.home() / "Desktop"
-    return (desktop if desktop.exists() else Path.home()) / "openclaw-py"
+    return (desktop if desktop.exists() else Path.home()) / "forgemind"
 
 
 def _resolve() -> Path:

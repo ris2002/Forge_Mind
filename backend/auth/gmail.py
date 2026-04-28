@@ -1,7 +1,7 @@
 """Gmail OAuth2 adapter using the Gmail REST API.
 
 OAuth tokens are stored encrypted via core.secret_store (Fernet).
-The client_secret.json file must be placed at ~/.openclaw/client_secret.json —
+The client_secret.json file must be placed in the ForgeMind workspace folder —
 download it from Google Cloud Console (OAuth2 Desktop App credentials).
 """
 
@@ -99,10 +99,12 @@ def clear_creds() -> None:
     secret_store.delete_key(_TOKEN_KEY)
 
 
-def send_mail(to_addr: str, subject: str, body: str) -> None:
+def send_mail(to_addr: str, subject: str, body: str, cc: str = "") -> None:
     service = get_gmail_service()
     msg = MIMEMultipart()
     msg["To"] = to_addr
+    if cc:
+        msg["Cc"] = cc
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain"))
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()

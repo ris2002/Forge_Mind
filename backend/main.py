@@ -1,5 +1,5 @@
 """
-OpenClaw-Py — composition root.
+ForgeMind — composition root.
 
 Run: uvicorn main:app --reload --port 8000
 

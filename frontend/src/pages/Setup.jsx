@@ -334,7 +334,7 @@ export default function Setup({ onComplete }) {
                 <div>1. Go to <span style={{ color: "var(--accent)", fontFamily: "var(--font-mono)" }}>console.cloud.google.com</span></div>
                 <div>2. Create a project → Enable <span style={{ fontFamily: "var(--font-mono)" }}>Gmail API</span></div>
                 <div>3. APIs & Services → Credentials → Create → OAuth 2.0 Client → Desktop App</div>
-                <div>4. Download the JSON → save as <span style={{ fontFamily: "var(--font-mono)" }}>~/Desktop/openclaw-py/client_secret.json</span></div>
+                <div>4. Download the JSON → save as <span style={{ fontFamily: "var(--font-mono)" }}>~/Desktop/forgemind/client_secret.json</span></div>
                 <div style={{ marginTop: 8, color: "var(--text-3)" }}>Only needed once. Anyone cloning this repo does the same with their own Google account.</div>
               </div>
 
@@ -424,7 +424,7 @@ export default function Setup({ onComplete }) {
               disabled={!canProceed()} style={{ flex: 2 }}>Continue →</button>
           ) : (
             <button className="oc-btn oc-btn--primary" onClick={finish}
-              disabled={!canProceed()} style={{ flex: 2 }}>Launch OpenClaw-Py →</button>
+              disabled={!canProceed()} style={{ flex: 2 }}>Launch ForgeMind →</button>
           )}
         </div>
       </main>
