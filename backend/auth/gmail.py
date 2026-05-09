@@ -99,13 +99,31 @@ def clear_creds() -> None:
     secret_store.delete_key(_TOKEN_KEY)
 
 
-def send_mail(to_addr: str, subject: str, body: str, cc: str = "") -> None:
+def trash_message(message_id: str) -> None:
+    service = get_gmail_service()
+    service.users().messages().trash(userId="me", id=message_id).execute()
+
+
+def send_mail(
+    to_addr: str,
+    subject: str,
+    body: str,
+    cc: str = "",
+    in_reply_to: str = "",
+    thread_id: str = "",
+) -> None:
     service = get_gmail_service()
     msg = MIMEMultipart()
     msg["To"] = to_addr
     if cc:
         msg["Cc"] = cc
     msg["Subject"] = subject
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+        msg["References"] = in_reply_to
     msg.attach(MIMEText(body, "plain"))
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-    service.users().messages().send(userId="me", body={"raw": raw}).execute()
+    send_body: dict = {"raw": raw}
+    if thread_id:
+        send_body["threadId"] = thread_id
+    service.users().messages().send(userId="me", body=send_body).execute()

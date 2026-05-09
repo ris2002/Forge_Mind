@@ -7,13 +7,15 @@ const Ic = ({ d, size = 14 }) => (
   </svg>
 );
 const IC = {
-  reply:   "M9 17H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l4 4v5M13 22l3-3-3-3M22 19h-6",
-  send:    "M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z",
-  x:       "M18 6L6 18M6 6l12 12",
-  refresh: "M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15",
-  block:   "M18.364 18.364A9 9 0 0 0 5.636 5.636m12.728 12.728A9 9 0 0 1 5.636 5.636m12.728 12.728L5.636 5.636",
-  star:    "M12 2l3 7 7 .7-5.3 4.8L18 22l-6-3.5L6 22l1.3-7.5L2 9.7 9 9z",
-  compose: "M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z",
+  reply:    "M9 17H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l4 4v5M13 22l3-3-3-3M22 19h-6",
+  send:     "M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z",
+  x:        "M18 6L6 18M6 6l12 12",
+  refresh:  "M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15",
+  block:    "M18.364 18.364A9 9 0 0 0 5.636 5.636m12.728 12.728A9 9 0 0 1 5.636 5.636m12.728 12.728L5.636 5.636",
+  star:     "M12 2l3 7 7 .7-5.3 4.8L18 22l-6-3.5L6 22l1.3-7.5L2 9.7 9 9z",
+  compose:  "M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z",
+  contacts: "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M23 21v-2a4 4 0 0 1-3-3.87M16 3.13a4 4 0 0 1 0 7.75M9 7a4 4 0 1 0 0-8 4 4 0 0 0 0 8z",
+  trash:    "M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6",
 };
 
 const composeLabelStyle = {
@@ -54,6 +56,8 @@ export default function MailMind() {
   const [composeDraftLoading, setComposeDraftLoading] = useState(false);
   const [composeSending, setComposeSending] = useState(false);
   const [refreshingFlagged, setRefreshingFlagged] = useState(false);
+  const [contactsPanel, setContactsPanel] = useState(null);
+  // contactsPanel shape: { stage: "loading"|"list"|"summary"|"confirm"|"done", contacts: [], selected: [], summaries: null, summarising: false, error: "", trashInGmail: true, deleting: false, deleteResult: null }
 
   const lastCheckRef = useRef("—");
   const filterRef   = useRef({ dateFrom: "", dateTo: "", flaggedOnly: false });
@@ -295,6 +299,70 @@ export default function MailMind() {
     setRefreshingFlagged(false);
   };
 
+  const handleOpenContacts = async () => {
+    setSelectedEmail(null);
+    setReplyPanel(null);
+    setComposePanel(null);
+    setContactsPanel({ stage: "loading", contacts: [], selected: [], summaries: null, summarising: false, error: "", trashInGmail: true, deleting: false, deleteResult: null });
+    try {
+      const contacts = await mailmindApi.listContacts();
+      setContactsPanel(p => ({ ...p, stage: "list", contacts: Array.isArray(contacts) ? contacts : [] }));
+    } catch {
+      setContactsPanel(p => ({ ...p, stage: "list", error: "Failed to load contacts." }));
+    }
+  };
+
+  const handleContactToggle = (addr) => {
+    setContactsPanel(p => ({
+      ...p,
+      selected: p.selected.includes(addr) ? p.selected.filter(e => e !== addr) : [...p.selected, addr],
+    }));
+  };
+
+  const handleContactSelectAll = () => {
+    setContactsPanel(p => {
+      const all = p.contacts.map(c => c.sender_email);
+      const allSelected = all.every(a => p.selected.includes(a));
+      return { ...p, selected: allSelected ? [] : all };
+    });
+  };
+
+  const handleSummariseContacts = async () => {
+    const toSummarise = contactsPanel.selected;
+    setContactsPanel(p => ({ ...p, stage: "summary", summaries: {}, summarising: true, error: "" }));
+    for (const addr of toSummarise) {
+      try {
+        const result = await mailmindApi.summariseContacts([addr]);
+        setContactsPanel(p => ({ ...p, summaries: { ...p.summaries, ...result } }));
+      } catch {
+        const info = contactsPanel.contacts.find(c => c.sender_email === addr);
+        setContactsPanel(p => ({
+          ...p,
+          summaries: { ...p.summaries, [addr]: { sender: info?.sender || addr, email_count: info?.email_count || 0, summary: "Failed to generate summary." } },
+        }));
+      }
+    }
+    setContactsPanel(p => ({ ...p, summarising: false }));
+  };
+
+  const handleContactsDeleteIntent = () => {
+    setContactsPanel(p => ({ ...p, stage: "confirm" }));
+  };
+
+  const handleConfirmDeleteContacts = async () => {
+    const { selected, trashInGmail } = contactsPanel;
+    setContactsPanel(p => ({ ...p, deleting: true, error: "" }));
+    try {
+      const result = await mailmindApi.deleteContactEmails(selected, trashInGmail);
+      const deletedAddrs = new Set(selected.map(a => a.toLowerCase()));
+      setEmails(prev => prev.filter(e => !deletedAddrs.has((e.sender_email || "").toLowerCase())));
+      if (selectedEmail && deletedAddrs.has((selectedEmail.sender_email || "").toLowerCase())) setSelectedEmail(null);
+      setContactsPanel(p => ({ ...p, deleting: false, stage: "done", deleteResult: result }));
+    } catch (e) {
+      setContactsPanel(p => ({ ...p, deleting: false, error: "Delete failed — check your Gmail connection." }));
+    }
+  };
+
   const handleComposeOpen = () => {
     setReplyPanel(null);
     setSelectedEmail(null);
@@ -437,6 +505,16 @@ export default function MailMind() {
           </button>
         )}
 
+        {/* Contacts */}
+        <button className="oc-btn" onClick={handleOpenContacts}
+          style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", fontSize: 12,
+            color: contactsPanel ? "var(--accent)" : undefined,
+            borderColor: contactsPanel ? "var(--accent-line)" : undefined,
+            background: contactsPanel ? "var(--accent-soft)" : undefined,
+          }}>
+          <Ic d={IC.contacts} size={12} /> Contacts
+        </button>
+
         {/* Compose new email */}
         <button className="oc-btn" onClick={handleComposeOpen}
           style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", fontSize: 12 }}>
@@ -562,7 +640,198 @@ export default function MailMind() {
 
         {/* Detail */}
         <div style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
-          {composePanel ? (
+          {contactsPanel ? (
+            <div style={{ flex: 1, overflowY: "auto", padding: "32px 40px", animation: "oc-fadein 0.2s ease" }}>
+              {/* Contacts panel header */}
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 24 }}>
+                <button onClick={() => setContactsPanel(null)}
+                  style={{ background: "transparent", border: "none", cursor: "pointer", color: "var(--text-2)", display: "flex", padding: 4 }}>
+                  <Ic d={IC.x} size={14} />
+                </button>
+                <h3 style={{ fontFamily: "var(--font-display)", fontWeight: 500, fontSize: 18, color: "var(--text-0)", margin: 0 }}>
+                  Contacts
+                </h3>
+                {contactsPanel.stage === "list" && (
+                  <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-3)", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                    {contactsPanel.contacts.length} sender{contactsPanel.contacts.length !== 1 ? "s" : ""}
+                  </span>
+                )}
+              </div>
+
+              {contactsPanel.stage === "loading" ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <Skeleton height={48} /><Skeleton height={48} /><Skeleton height={48} />
+                </div>
+
+              ) : contactsPanel.stage === "done" ? (
+                <div>
+                  <p style={{ fontSize: 14, color: "var(--text-1)", marginBottom: 8 }}>
+                    Deleted {contactsPanel.deleteResult?.deleted || 0} email{(contactsPanel.deleteResult?.deleted || 0) !== 1 ? "s" : ""} from MailMind.
+                  </p>
+                  {contactsPanel.deleteResult?.errors?.length > 0 && (
+                    <p style={{ fontSize: 12, color: "var(--danger)", marginBottom: 12, padding: "8px 12px", background: "rgba(201,112,100,0.08)", borderRadius: "var(--r-sm)", border: "1px solid rgba(201,112,100,0.25)" }}>
+                      {contactsPanel.deleteResult.errors.length} Gmail error{contactsPanel.deleteResult.errors.length !== 1 ? "s" : ""} — emails removed from MailMind but may still appear in Gmail.
+                    </p>
+                  )}
+                  <button className="oc-btn" onClick={() => setContactsPanel(null)} style={{ padding: "8px 16px" }}>Close</button>
+                </div>
+
+              ) : contactsPanel.stage === "confirm" ? (
+                (() => {
+                  const total = contactsPanel.contacts
+                    .filter(c => contactsPanel.selected.includes(c.sender_email))
+                    .reduce((s, c) => s + c.email_count, 0);
+                  return (
+                    <div>
+                      <p style={{ fontSize: 14, color: "var(--text-0)", fontWeight: 500, marginBottom: 8 }}>
+                        Delete emails from {contactsPanel.selected.length} contact{contactsPanel.selected.length !== 1 ? "s" : ""}?
+                      </p>
+                      <p style={{ fontSize: 13, color: "var(--text-2)", marginBottom: 20, lineHeight: 1.6 }}>
+                        {total} email{total !== 1 ? "s" : ""} will be removed from MailMind.
+                      </p>
+                      <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 24, cursor: "pointer", fontSize: 13, color: "var(--text-1)" }}>
+                        <input type="checkbox" checked={contactsPanel.trashInGmail}
+                          onChange={e => setContactsPanel(p => ({ ...p, trashInGmail: e.target.checked }))}
+                          style={{ accentColor: "var(--accent)", width: 14, height: 14 }} />
+                        Also move to Gmail trash
+                        <span style={{ fontSize: 11, color: "var(--text-3)" }}>— recoverable for 30 days</span>
+                      </label>
+                      {contactsPanel.error && (
+                        <p style={{ fontSize: 12, color: "var(--danger)", marginBottom: 12, padding: "8px 12px", background: "rgba(201,112,100,0.08)", borderRadius: "var(--r-sm)", border: "1px solid rgba(201,112,100,0.25)" }}>
+                          {contactsPanel.error}
+                        </p>
+                      )}
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button className="oc-btn oc-btn--danger" onClick={handleConfirmDeleteContacts}
+                          disabled={contactsPanel.deleting}
+                          style={{ flex: 2, padding: 11, color: "var(--danger)", borderColor: "rgba(201,112,100,0.3)" }}>
+                          {contactsPanel.deleting ? "Deleting…" : "Confirm delete"}
+                        </button>
+                        <button className="oc-btn" onClick={() => setContactsPanel(p => ({ ...p, stage: "list", error: "" }))}
+                          disabled={contactsPanel.deleting}
+                          style={{ flex: 1, padding: 11 }}>Cancel</button>
+                      </div>
+                    </div>
+                  );
+                })()
+
+              ) : contactsPanel.stage === "summary" ? (
+                <div>
+                  {contactsPanel.summarising && Object.keys(contactsPanel.summaries || {}).length === 0 ? (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                      <p style={{ fontSize: 12, color: "var(--text-3)", fontFamily: "var(--font-mono)", letterSpacing: "0.04em", marginBottom: 4 }}>
+                        Summarising…
+                      </p>
+                      <Skeleton height={12} /><Skeleton width="85%" height={12} /><Skeleton width="65%" height={12} />
+                    </div>
+                  ) : (
+                    <div>
+                      {Object.entries(contactsPanel.summaries || {}).map(([addr, info]) => (
+                        <div key={addr} style={{ marginBottom: 20, padding: 16, background: "var(--accent-soft)", border: "1px solid var(--accent-line)", borderRadius: "var(--r-md)" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                            <span style={{ fontSize: 13, fontWeight: 500, color: "var(--text-0)" }}>{info.sender}</span>
+                            <span style={{ fontSize: 10, color: "var(--text-3)", fontFamily: "var(--font-mono)" }}>
+                              {info.email_count} email{info.email_count !== 1 ? "s" : ""}
+                            </span>
+                            {contactsPanel.summarising && Object.keys(contactsPanel.summaries).indexOf(addr) === Object.keys(contactsPanel.summaries).length - 1 && (
+                              <div style={{ display: "flex", gap: 3, marginLeft: 4 }}>
+                                {[0, 0.2, 0.4].map((d, i) => (
+                                  <div key={i} style={{ width: 4, height: 4, borderRadius: "50%", background: "var(--accent)", animation: `oc-pulse 1s ${d}s infinite` }} />
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                          <p style={{ fontSize: 13, color: "var(--text-1)", lineHeight: 1.7, margin: 0, whiteSpace: "pre-wrap" }}>{info.summary}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {contactsPanel.error && (
+                    <p style={{ fontSize: 12, color: "var(--danger)", marginBottom: 12 }}>{contactsPanel.error}</p>
+                  )}
+                  <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                    {!contactsPanel.summarising && (
+                      <button className="oc-btn" onClick={() => setContactsPanel(p => ({ ...p, stage: "list", summaries: null, error: "" }))}
+                        style={{ padding: "9px 16px", fontSize: 12 }}>← Back</button>
+                    )}
+                    {!contactsPanel.summarising && Object.keys(contactsPanel.summaries || {}).length > 0 && (
+                      <button className="oc-btn oc-btn--danger" onClick={handleContactsDeleteIntent}
+                        style={{ flex: 1, padding: 9, color: "var(--danger)", borderColor: "rgba(201,112,100,0.3)", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+                        <Ic d={IC.trash} size={12} /> Delete from Gmail
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+              ) : (
+                /* list stage */
+                <div>
+                  {contactsPanel.error && (
+                    <p style={{ fontSize: 12, color: "var(--danger)", marginBottom: 12 }}>{contactsPanel.error}</p>
+                  )}
+                  {contactsPanel.contacts.length === 0 ? (
+                    <p style={{ fontSize: 13, color: "var(--text-3)" }}>No contacts yet — fetch your inbox first.</p>
+                  ) : (
+                    <div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+                        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-2)", cursor: "pointer" }}>
+                          <input type="checkbox"
+                            checked={contactsPanel.contacts.length > 0 && contactsPanel.contacts.every(c => contactsPanel.selected.includes(c.sender_email))}
+                            onChange={handleContactSelectAll}
+                            style={{ accentColor: "var(--accent)" }} />
+                          Select all
+                        </label>
+                        <span style={{ marginLeft: "auto", fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text-3)" }}>
+                          {contactsPanel.selected.length} selected
+                        </span>
+                      </div>
+
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 20 }}>
+                        {contactsPanel.contacts.map(c => {
+                          const isSelected = contactsPanel.selected.includes(c.sender_email);
+                          return (
+                            <label key={c.sender_email} style={{
+                              display: "flex", alignItems: "center", gap: 10, padding: "10px 12px",
+                              cursor: "pointer", borderRadius: "var(--r-sm)",
+                              background: isSelected ? "var(--accent-soft)" : "var(--bg-1)",
+                              border: `1px solid ${isSelected ? "var(--accent-line)" : "var(--border-subtle)"}`,
+                              transition: "background 0.12s",
+                            }}>
+                              <input type="checkbox"
+                                checked={isSelected}
+                                onChange={() => handleContactToggle(c.sender_email)}
+                                style={{ accentColor: "var(--accent)", flexShrink: 0 }} />
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 13, color: "var(--text-0)", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.sender}</div>
+                                <div style={{ fontSize: 11, color: "var(--text-3)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.sender_email}</div>
+                              </div>
+                              <div style={{ textAlign: "right", flexShrink: 0 }}>
+                                <div style={{ fontSize: 12, color: "var(--text-2)" }}>{c.email_count} email{c.email_count !== 1 ? "s" : ""}</div>
+                                <div style={{ fontSize: 10, color: "var(--text-3)", fontFamily: "var(--font-mono)" }}>{c.last_email}</div>
+                              </div>
+                            </label>
+                          );
+                        })}
+                      </div>
+
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button className="oc-btn oc-btn--primary" onClick={handleSummariseContacts}
+                          disabled={contactsPanel.selected.length === 0}
+                          style={{ flex: 2, padding: 11, opacity: contactsPanel.selected.length === 0 ? 0.5 : 1 }}>
+                          Summarise selected
+                        </button>
+                        <button className="oc-btn oc-btn--danger" onClick={handleContactsDeleteIntent}
+                          disabled={contactsPanel.selected.length === 0}
+                          style={{ flex: 1, padding: 11, color: "var(--danger)", borderColor: "rgba(201,112,100,0.3)", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, opacity: contactsPanel.selected.length === 0 ? 0.5 : 1 }}>
+                          <Ic d={IC.trash} size={12} /> Delete
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : composePanel ? (
             <div style={{ flex: 1, overflowY: "auto", padding: "32px 40px", animation: "oc-fadein 0.2s ease" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 24 }}>
                 <button onClick={() => setComposePanel(null)}

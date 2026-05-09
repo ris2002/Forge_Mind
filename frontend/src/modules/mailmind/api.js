@@ -49,6 +49,12 @@ export const mailmindApi = {
   draftReply:     (id, intent) => post(`${BASE}/reply/draft`, { email_id: id, user_intent: intent }),
   sendReply:      (id, draft) => post(`${BASE}/reply/send`, { email_id: id, draft }),
 
+  // contacts
+  listContacts:        () => get(`${BASE}/contacts`),
+  summariseContacts:   (senderEmails) => post(`${BASE}/contacts/summarise`, { sender_emails: senderEmails }),
+  deleteContactEmails: (senderEmails, trashInGmail = true) =>
+    post(`${BASE}/contacts/delete`, { sender_emails: senderEmails, trash_in_gmail: trashInGmail }),
+
   // blocklist
   getBlocklist:   () => get(`${BASE}/blocklist`),
   addBlock:       (entry) => post(`${BASE}/blocklist/add`, { entry }),

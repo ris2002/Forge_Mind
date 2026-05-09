@@ -55,6 +55,15 @@ class ComposeSendIn(BaseModel):
     flag: bool = False
 
 
+class ContactsActionIn(BaseModel):
+    sender_emails: list[str]
+
+
+class DeleteContactsIn(BaseModel):
+    sender_emails: list[str]
+    trash_in_gmail: bool = True
+
+
 class ModuleSettingsIn(BaseModel):
     user_name: Optional[str] = None
     user_title: Optional[str] = None
@@ -165,6 +174,22 @@ def compose_send_route(body: ComposeSendIn):
         return service.send_compose(body.to, body.cc, body.subject, body.draft, body.flag, body.to_name)
     except RuntimeError as e:
         raise HTTPException(status_code=401, detail=str(e))
+
+
+# ── contacts ────────────────────────────────────────────────
+@router.get("/contacts")
+def list_contacts():
+    return service.list_contacts()
+
+
+@router.post("/contacts/summarise")
+def summarise_contacts_route(body: ContactsActionIn):
+    return service.summarise_contacts(body.sender_emails)
+
+
+@router.post("/contacts/delete")
+def delete_contact_emails_route(body: DeleteContactsIn):
+    return service.delete_contact_emails(body.sender_emails, body.trash_in_gmail)
 
 
 # ── blocklist ───────────────────────────────────────────────

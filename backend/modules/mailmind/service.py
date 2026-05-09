@@ -70,6 +70,9 @@ def fetch_inbox(date_from: str | None = None, date_to: str | None = None) -> lis
     for ref in message_refs:
         msg_id = ref["id"]
         if msg_id in emails:
+            # Backfill gmail_thread_id if missing — threadId is in the list response for free
+            if not emails[msg_id].get("gmail_thread_id") and ref.get("threadId"):
+                emails[msg_id]["gmail_thread_id"] = ref["threadId"]
             continue
         try:
             msg_data = service.users().messages().get(
@@ -98,6 +101,8 @@ def fetch_inbox(date_from: str | None = None, date_to: str | None = None) -> lis
 
             emails[msg_id] = {
                 "id": msg_id,
+                "gmail_thread_id": msg_data.get("threadId", ""),
+                "gmail_message_id": msg.get("Message-ID", ""),
                 "sender": sender_name,
                 "sender_first": sender_first,
                 "sender_email": sender_email_addr,
@@ -611,10 +616,36 @@ def send_reply(email_id: str, draft: str) -> dict:
     data = emails.get(email_id)
     if not data:
         raise LookupError("Email not found")
+
+    gmail_thread_id = data.get("gmail_thread_id", "")
+    gmail_message_id = data.get("gmail_message_id", "")
+
+    # Backfill threading fields live for emails stored before these fields existed.
+    # threadId is the critical one — without it Gmail creates a new thread.
+    if not gmail_thread_id or not gmail_message_id:
+        try:
+            svc = gmail.get_gmail_service()
+            msg_data = svc.users().messages().get(userId="me", id=email_id, format="raw").execute()
+            if not gmail_thread_id:
+                gmail_thread_id = msg_data.get("threadId", "")
+                emails[email_id]["gmail_thread_id"] = gmail_thread_id
+            if not gmail_message_id:
+                raw_bytes = base64.urlsafe_b64decode(msg_data["raw"] + "==")
+                parsed = email_lib.message_from_bytes(raw_bytes)
+                gmail_message_id = parsed.get("Message-ID", "")
+                emails[email_id]["gmail_message_id"] = gmail_message_id
+            store.save_emails(emails)
+        except Exception as exc:
+            print(f"[mailmind.send_reply] threading backfill failed for {email_id}: {exc}")
+
+    raw_subject = data.get("subject", "")
+    reply_subject = raw_subject if raw_subject.lower().startswith("re:") else f"Re: {raw_subject}"
     gmail.send_mail(
         to_addr=data.get("sender_email", ""),
-        subject=f"Re: {data.get('subject', '')}",
+        subject=reply_subject,
         body=draft,
+        in_reply_to=gmail_message_id,
+        thread_id=gmail_thread_id,
     )
     emails[email_id]["read"] = True
 
@@ -647,6 +678,112 @@ def send_reply(email_id: str, draft: str) -> dict:
 
     store.save_emails(emails)
     return {"sent": True}
+
+
+# ─────────────────────────────────────────────────────────────
+# Contacts — bulk view / summarise / delete
+# ─────────────────────────────────────────────────────────────
+def list_contacts() -> list[dict]:
+    """Return unique senders grouped by email address, sorted by most recent."""
+    emails = store.load_emails()
+    contacts: dict[str, dict] = {}
+    for e in emails.values():
+        if e.get("direction") == "sent":
+            continue
+        addr = e.get("sender_email", "").lower().strip()
+        if not addr:
+            continue
+        if addr not in contacts:
+            contacts[addr] = {
+                "sender_email": addr,
+                "sender": e.get("sender", addr),
+                "email_count": 0,
+                "last_email": "",
+                "latest_raw": "",
+            }
+        contacts[addr]["email_count"] += 1
+        raw = e.get("time_raw", "")
+        dt = parsing.parse_date(raw)
+        existing_dt = parsing.parse_date(contacts[addr]["latest_raw"]) if contacts[addr]["latest_raw"] else None
+        if dt and (not existing_dt or dt > existing_dt):
+            contacts[addr]["latest_raw"] = raw
+            contacts[addr]["last_email"] = e.get("time", "")
+    return sorted(
+        contacts.values(),
+        key=lambda c: _time_key({"time_raw": c.get("latest_raw", "")}),
+        reverse=True,
+    )
+
+
+def summarise_contacts(sender_emails: list[str]) -> dict:
+    """Generate AI summary of all emails from each selected sender."""
+    all_emails = store.load_emails()
+    user_name = module_settings.get("user_name", "User")
+    summaries: dict[str, dict] = {}
+
+    for addr in sender_emails:
+        sender_msgs = sorted(
+            [e for e in all_emails.values()
+             if e.get("sender_email", "").lower() == addr.lower()
+             and e.get("direction") != "sent"],
+            key=_time_key,
+        )
+        if not sender_msgs:
+            summaries[addr] = {"sender": addr, "email_count": 0, "summary": "No emails found."}
+            continue
+        sender_name = sender_msgs[-1].get("sender", addr)
+        prompt = prompts.contact_emails_prompt(sender_name, sender_msgs, user_name)
+        try:
+            summary = llm_generate(prompt)
+        except Exception as exc:
+            summary = f"Could not summarise: {exc}"
+        summaries[addr] = {
+            "sender": sender_name,
+            "email_count": len(sender_msgs),
+            "summary": summary.strip() or "LLM returned empty response.",
+        }
+
+    return summaries
+
+
+def delete_contact_emails(sender_emails: list[str], trash_in_gmail: bool = True) -> dict:
+    """Delete all emails from selected senders from local store and optionally Gmail trash."""
+    emails = store.load_emails()
+    chroma_path = module_settings.get("chroma_path", "")
+    deleted = 0
+    gmail_errors: list[str] = []
+
+    for addr in sender_emails:
+        addr_lower = addr.lower()
+        to_delete = [
+            eid for eid, e in emails.items()
+            if e.get("sender_email", "").lower() == addr_lower
+            and e.get("direction") != "sent"
+        ]
+        for eid in to_delete:
+            e = emails[eid]
+            if trash_in_gmail:
+                gmail_id = e.get("id", "")
+                if gmail_id and not gmail_id.startswith("composed_") and not gmail_id.startswith("sent_"):
+                    try:
+                        gmail.trash_message(gmail_id)
+                    except Exception as exc:
+                        gmail_errors.append(f"{gmail_id}: {exc}")
+            if chroma_path:
+                chroma.delete_embedding(eid, chroma_path)
+            del emails[eid]
+            deleted += 1
+
+        sent_to_delete = [
+            eid for eid, e in emails.items()
+            if e.get("direction") == "sent"
+            and e.get("related_sender_email", "").lower() == addr_lower
+        ]
+        for eid in sent_to_delete:
+            del emails[eid]
+
+    store.save_emails(emails)
+    return {"deleted": deleted, "errors": gmail_errors}
 
 
 # ─────────────────────────────────────────────────────────────

@@ -13,13 +13,7 @@ DEFAULTS = {
     "work_end": "18:00",
     "check_interval": 30,
     "chroma_path": "",  # set by user in Settings → MailMind after workspace is confirmed
-    "system_prompt": (
-        "Be concise and professional. "
-        "Get to the point in the first sentence — no filler openers like 'I hope this email finds you well'. "
-        "Match the tone of the sender: formal if they are formal, relaxed if they are casual. "
-        "Never use placeholders or make up facts not given. "
-        "Keep replies under 150 words unless the topic genuinely requires more."
-    ),
+    "system_prompt": "",  # leave blank to use the built-in default rules
 }
 
 settings = module_settings(MODULE_ID, DEFAULTS)

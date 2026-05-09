@@ -4,6 +4,15 @@ import { authApi } from "../api/auth";
 import { providersApi } from "../api/providers";
 import { mailmindApi } from "../modules/mailmind/api";
 
+const openUrl = async (url) => {
+  if (window.__TAURI_INTERNALS__) {
+    const { open } = await import("@tauri-apps/plugin-shell");
+    await open(url);
+  } else {
+    window.open(url, "_blank");
+  }
+};
+
 const STEPS = [
   { id: "provider", label: "AI Model" },
   { id: "gmail",    label: "Gmail" },
@@ -75,7 +84,7 @@ export default function Setup({ onComplete }) {
     setGmailError("");
     try {
       const { url } = await authApi.loginUrl();
-      window.open(url, "_blank");
+      await openUrl(url);
       setGmailStatus("waiting");
       // Poll until Google redirects back and the backend saves the token
       gmailPollRef.current = setInterval(async () => {

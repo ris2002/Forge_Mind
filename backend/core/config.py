@@ -13,6 +13,8 @@ CORS_ORIGINS = [
     "http://localhost:5173",
     "http://localhost:3000",
     "app://.",
+    "tauri://localhost",        # macOS Tauri webview origin
+    "http://tauri.localhost",   # Windows/Linux Tauri webview origin
 ]
 
 

@@ -13,7 +13,7 @@ The idea is simple: your AI tools should run on your machine, store nothing in t
 | Layer | What it does |
 |---|---|
 | **Platform core** | Gmail OAuth2, LLM provider switching (Ollama / Claude / OpenAI / Gemini), encrypted secret storage, module registry, settings |
-| **MailMind** | Inbox triage — fetch, summarise, flag conversations, draft replies, compose outgoing emails, block senders |
+| **MailMind** | Inbox triage — fetch, summarise, flag conversations, draft replies, compose outgoing emails, block senders, bulk contact summary and cleanup |
 | **Future modules** | Anything. The architecture is designed so you add a folder and register it — the shell, sidebar, settings, and API surface are all module-agnostic |
 
 ---
@@ -258,6 +258,22 @@ When you send a reply to a flagged email the sent draft is stored as a `directio
 
 Normal emails do not record sent replies.
 
+### Contact cleanup (bulk summarise and delete)
+
+Click **Contacts** in the MailMind header to open the Contacts panel. This shows every unique sender from your current inbox, grouped by email address, with their message count and the date of their last email.
+
+**Flow:**
+
+1. **Select senders** — tick individual contacts or use "Select all". The selection count is shown inline.
+2. **Summarise selected** — the AI generates a summary per contact, one at a time. Summaries appear as each one finishes so you don't wait for the full batch. Each summary covers: who the person is, what they've written about, any instructions or asks they've made, any dates or amounts mentioned, and what you need to do.
+3. **Delete** — available from the contact list directly or after reviewing summaries. A confirmation screen shows the total email count about to be removed and lets you choose:
+   - **Also move to Gmail trash** (default on) — emails are moved to Gmail's trash (recoverable for 30 days) in addition to being removed from MailMind
+   - **MailMind only** — removes from the local store only; Gmail is untouched
+
+The delete operation removes all emails from the selected senders, all their ChromaDB embeddings, and all `direction: "sent"` reply records addressed to them.
+
+**Typical use case:** select all newsletter senders or low-priority contacts you no longer need → summarise to confirm there's nothing important → delete to clear junk in one action.
+
 ### Block sender
 
 Blocking a sender does the following atomically:
@@ -267,9 +283,47 @@ Blocking a sender does the following atomically:
 - Deletes all ChromaDB embeddings for their flagged threads
 - Removes all `direction: "sent"` reply records addressed to them
 
+### Gmail API reference
+
+All Gmail calls go through the Gmail REST API v1 via `googleapiclient` (`build("gmail", "v1", ...)`). A single OAuth2 scope covers everything:
+
+```
+https://www.googleapis.com/auth/gmail.modify
+```
+
+`gmail.modify` grants read + send + label/trash. It does **not** grant permanent delete — `users.messages.trash` moves to trash (recoverable for 30 days); permanent deletion would require `gmail.readonly` + `gmail.modify` + explicit delete permission, which Google does not expose to non-GSuite apps.
+
+| Gmail API method | Used by | What it does |
+|---|---|---|
+| `users.messages.list` | `fetch_inbox` | Lists up to 50 inbox message IDs, optionally filtered with `after:`/`before:` query terms |
+| `users.messages.get` (format=`raw`) | `fetch_inbox` | Fetches the full RFC 2822 raw message for each new ID — used to extract sender, subject, body, Message-ID header |
+| `users.getProfile` | `fetch_inbox` | Reads the current `historyId` after a full fetch — used to set the baseline for the History API daemon |
+| `users.history.list` | `check_new_emails` (daemon) | Returns only changes (message additions) since the stored `historyId` — O(1) cost when inbox is quiet |
+| `users.messages.send` | `send_reply`, `send_compose` | Sends a new or reply email; `threadId` + `In-Reply-To`/`References` headers are set on replies to keep Gmail threading intact |
+| `users.messages.trash` | `delete_contact_emails` (Contacts cleanup) | Moves a message to Gmail trash — recoverable from Gmail for 30 days |
+
 ### ChromaDB
 
 Vector embeddings are stored at `[workspace]/chromadb/MailMind/`. Set in Settings → MailMind → Chroma path. Requires `chromadb` to be installed; if not, all chroma calls fail silently and the rest of the app is unaffected.
+
+### Reply threading
+
+Replies are sent as proper Gmail thread continuations, not new emails. During `fetch_inbox`, each email stores `gmail_thread_id` (Gmail API thread ID) and `gmail_message_id` (RFC 2822 `Message-ID` header). When `send_reply` is called, both are forwarded to `gmail.send_mail`, which sets `In-Reply-To`, `References`, and `threadId` on the outgoing message. The reply appears inside the correct Gmail thread on both sides.
+
+### Prompt architecture (small LLM optimised)
+
+All prompts in `backend/modules/mailmind/prompts.py` are written for small local models (llama3.2, mistral, phi3) and remain effective on larger models:
+
+| Technique | Why |
+|---|---|
+| **Output priming** | Prompts end with `Hi {name},` — the model continues rather than deciding format |
+| **Numbered rules, max 4** | Small models track ~3-4 constraints reliably; more causes rule drop |
+| **Behavioral instructions** | "Stop writing the moment the point is made" instead of "under 150 words" — models can't count |
+| **No conditional logic** | "Match their length and formality" instead of "formal if formal, casual if casual" |
+| **Context caps** | Summary: 1500 chars, reply: 800 chars — smaller context = sharper focus |
+| **Thread cap at 4 emails** | Beyond 4, small models confuse who said what |
+
+Summary prompts explicitly extract: what the email is about, any instructions or requests directed at the user, exact dates/deadlines/amounts, and next actions. The user's custom system prompt (Settings → MailMind → Writing style) is merged in as a plain-English fifth rule — one sentence is enough.
 
 ---
 
@@ -394,6 +448,9 @@ Done. The shell renders the sidebar item, App routes to your component, Settings
 /api/modules/mailmind/reply/send            POST: send via Gmail API
 /api/modules/mailmind/compose/draft         POST: draft a new outgoing email (to, to_name, cc, subject, user_intent)
 /api/modules/mailmind/compose/send          POST: send composed email + optionally flag conversation
+/api/modules/mailmind/contacts              GET: list unique senders (email, name, count, last date)
+/api/modules/mailmind/contacts/summarise    POST: AI summary for selected senders { sender_emails: [] }
+/api/modules/mailmind/contacts/delete       POST: delete emails from senders { sender_emails: [], trash_in_gmail: bool }
 /api/modules/mailmind/blocklist             GET / add / remove
 /api/modules/mailmind/daemon/status         GET: running, paused, last_check
 /api/modules/mailmind/daemon/start          POST
@@ -431,6 +488,9 @@ Issues resolved during active development — documented here so they don't regr
 | 6 | **Dismiss too aggressive** | Dismiss on a flagged email was deleting all thread emails. Correct behaviour: only delete the ChromaDB embedding and unflag — the email and conversation history stay in the inbox. Dismiss on a normal (unflagged) email still removes it entirely. Frontend detects `{ kept: true }` in the response and updates state accordingly. |
 | 7 | **Flagged summary not auto-updating** | `mergeEmails` always preferred the local cached summary over any backend update, so background re-summarisation results never appeared until you navigated away. Fix: if the backend returns a non-empty summary that differs from the local one, trust it. `refreshStatus` now also calls `setSelectedEmail` and `getThread` to push updates into the open panel without navigation. |
 | 8 | **Compose name mangling** | `_extract_display_name` fell back to the email local part (`rb123` from `rb123@gmail.com`), causing the AI to open drafts with "Hi rb123". Fix: the compose form requires an explicit "Their name" field; this value is passed to the prompt directly, bypassing all name inference. |
+| 9 | **Reply threading broken** | Replies were sent without `In-Reply-To`, `References`, or `threadId`, so Gmail treated every reply as a brand new email instead of adding it to the existing thread. Fix: `fetch_inbox` now stores `gmail_thread_id` and `gmail_message_id` per email; `send_reply` passes both to `gmail.send_mail` which adds the RFC headers and `threadId` to the API call. |
+| 10 | **Double Re: prefix** | `send_reply` always prepended `"Re: "` regardless of the original subject, producing `"Re: Re: Meeting"`. Fix: checks `subject.lower().startswith("re:")` before prepending. |
+| 11 | **OAuth URL blocked in Tauri webview** | `window.open(url, "_blank")` in the Gmail sign-in step tried to open the Google auth URL inside a new webview window. Google blocks OAuth in embedded webviews. Fix: detects `window.__TAURI_INTERNALS__` and uses `open()` from `@tauri-apps/plugin-shell` to launch the URL in the system browser (Safari/Chrome) instead. |
 
 ---
 
@@ -441,9 +501,131 @@ Issues resolved during active development — documented here so they don't regr
 - **API keys** are Fernet-encrypted in `[workspace]/keys.enc`. Master key at `[workspace]/master.key` (chmod 600).
 - **Gmail OAuth token** is stored encrypted via the same Fernet store — never in plaintext.
 - **Workspace location** is recorded in `~/.forgemind-location` (a single line). That is the only file ForgeMind writes outside the workspace folder.
-- **CORS** is restricted to `localhost:5173`, `localhost:3000`, and `app://.` only.
+- **CORS** is restricted to `localhost:5173`, `localhost:3000`, `app://.`, `tauri://localhost`, and `http://tauri.localhost` only.
 - **Prompt injection** is mitigated by wrapping all email content in `<email>` or `<thread>` tags with an explicit instruction to treat content as data, not instructions.
 - **chroma_path** is validated against system directories before use.
+
+---
+
+## Desktop deployment (Tauri)
+
+ForgeMind can be packaged as a native desktop application using **Tauri v2**. The React frontend runs inside Tauri's webview; the Python backend is compiled into a standalone binary by PyInstaller and launched as a **sidecar process** alongside the app.
+
+### Architecture
+
+```
+ForgeMind.app (or .exe / .AppImage)
+├── webview  →  React frontend (embedded via Tauri)
+└── sidecar  →  forgemind-backend (PyInstaller binary, auto-launched by Tauri)
+                  └── uvicorn + FastAPI at 127.0.0.1:8000
+```
+
+The frontend still calls `http://localhost:8000` for the API — the only change is the origin of the webview (`tauri://localhost` on macOS, `http://tauri.localhost` on Windows/Linux), which is added to `CORS_ORIGINS`.
+
+### Prerequisites
+
+| Tool | Install |
+|---|---|
+| Rust + Cargo | `curl https://sh.rustup.rs -sSf \| sh` |
+| Tauri CLI v2 | `cargo install tauri-cli --version "^2"` |
+| Node.js 18+ | via nvm or https://nodejs.org |
+| Python 3.11+ | with `pip install -r backend/requirements.txt` |
+| PyInstaller | `pip install pyinstaller` |
+
+### One-command build
+
+```bash
+bash scripts/build-desktop.sh
+```
+
+This script:
+1. Runs PyInstaller on `backend/forgemind.spec` → produces `forgemind-backend` binary
+2. Copies it into `src-tauri/binaries/forgemind-backend-<rust-target-triple>` (Tauri's required naming)
+3. Builds the frontend (`npm run build`)
+4. Runs `cargo tauri build` → produces the installable bundle
+
+Output is in `src-tauri/target/release/bundle/`:
+- **macOS** — `ForgeMind.app` (dmg)
+- **Windows** — `ForgeMind_setup.exe` (NSIS installer) and/or `.msi`
+- **Linux** — `.AppImage`, `.deb`, or `.rpm`
+
+### Development mode (with hot reload)
+
+```bash
+# Terminal 1 — Python backend
+cd backend && uvicorn main:app --reload --port 8000
+
+# Terminal 2 — Tauri dev (opens native window, hot-reloads frontend)
+cd frontend && npm install
+cargo tauri dev
+```
+
+`tauri dev` reads `beforeDevCommand` from `src-tauri/tauri.conf.json` and starts Vite automatically, so you only need to run the backend separately.
+
+### Key files
+
+| File | Purpose |
+|---|---|
+| `src-tauri/tauri.conf.json` | Tauri v2 config — window, bundle, sidecar declaration |
+| `src-tauri/Cargo.toml` | Rust crate with `tauri` + `tauri-plugin-shell` dependencies |
+| `src-tauri/src/lib.rs` | Spawns the backend sidecar; kills it when the window closes |
+| `src-tauri/capabilities/default.json` | Grants `shell:allow-execute` so the sidecar can be launched |
+| `backend/forgemind.spec` | PyInstaller spec — lists all hidden imports for FastAPI/uvicorn/google-auth |
+| `scripts/build-desktop.sh` | End-to-end build script |
+| `backend/main.py` | `if __name__ == "__main__"` block added for PyInstaller entry point |
+| `frontend/vite.config.js` | Fixed port 5173, `base: './'` for Tauri asset paths |
+
+### How Tauri communicates with the Python backend
+
+This is the most important thing to understand about the architecture — and it is simpler than it sounds.
+
+**Tauri does not use any special IPC to talk to Python.** The communication is plain HTTP, exactly the same as when you run the app in a browser during development.
+
+Here is the full call chain:
+
+```
+User clicks a button in React
+        │
+        ▼
+mailmindApi.fetchInbox()          ← api.js: fetch("http://localhost:8000/...")
+        │
+        ▼  plain HTTP over loopback (127.0.0.1)
+        │
+FastAPI route in routes.py        ← running inside forgemind-backend (sidecar)
+        │
+        ▼
+service.py → Gmail API / LLM / ChromaDB
+        │
+        ▼  JSON response
+        │
+React state update → UI re-render
+```
+
+**What Tauri actually does:**
+
+1. **At launch** — `src-tauri/src/lib.rs` calls `app.shell().sidecar("forgemind-backend").spawn()`. This starts the PyInstaller binary as a child process of the Tauri app. The binary runs `uvicorn` on `127.0.0.1:8000`, same as when you start it manually.
+
+2. **While running** — the webview loads the React frontend (bundled HTML/JS). Every API call the frontend makes goes to `http://localhost:8000` over the loopback interface. No data ever leaves the machine.
+
+3. **On close** — when the last window is destroyed, `lib.rs` calls `child.kill()` on the stored `CommandChild`. The Python process exits cleanly.
+
+**Why CORS is needed even though it's all local:**
+
+Browsers enforce the Same-Origin Policy regardless of whether the other origin is remote or local. The Tauri webview is no different. Its origin is `tauri://localhost` on macOS and `http://tauri.localhost` on Windows/Linux — both of which differ from `http://localhost:8000`. Without the CORS header allowing those origins, the browser would block every API response. That is why `CORS_ORIGINS` in `backend/core/config.py` explicitly lists them.
+
+**What Tauri Rust code does NOT do:**
+
+- It does not proxy or inspect HTTP traffic between the frontend and backend.
+- It does not use `tauri::command` / `#[tauri::command]` for any data path (only a trivial `backend_ready` healthcheck is wired up that way).
+- It does not use Tauri's built-in IPC (`invoke`) for anything meaningful — all data flows through the FastAPI REST layer.
+
+The mental model: Tauri is a process manager + webview host. Python is the server. React is the client. They talk HTTP. Tauri just makes sure the server is running and the window exists.
+
+### Notes
+
+- The sidecar binary must be named `forgemind-backend-<triple>` (e.g. `forgemind-backend-aarch64-apple-darwin` on Apple Silicon). `build-desktop.sh` handles this automatically.
+- On macOS you may need to sign and notarise the app for distribution — see the [Tauri distribution guide](https://v2.tauri.app/distribute/).
+- `client_secret.json` and Gmail OAuth tokens are **not** bundled — users still place them in their workspace folder on first run.
 
 ---
 

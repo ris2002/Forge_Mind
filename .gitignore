@@ -6,14 +6,23 @@ __pycache__/
 *.pyo
 *.pyd
 *.egg-info/
-dist/
-build/
+backend/dist/
+backend/build/
+
+# PyInstaller — compiled sidecar binaries (built by scripts/build-desktop.sh)
+src-tauri/binaries/forgemind-backend-*
 
 # Node
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 node_modules/
+
+# Tauri build output
+src-tauri/target/
+
+# Tauri generated files (auto-created by cargo tauri build)
+src-tauri/gen/
 
 # Environment & secrets
 .env
