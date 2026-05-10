@@ -1,32 +1,83 @@
 # ForgeMind Backend — Codebase Notes
 
-A file-by-file breakdown of every function with full explanations of what each one does, which other functions it calls internally, and what frontend action triggers it.
+A file-by-file breakdown of every function with full explanations, internal call chains, and what frontend action triggers each one.
 
 ---
 
-## Overview
+## Overall App Working — Big Picture
 
-The backend is a **FastAPI** app. It is structured into:
+Before reading individual files, understand how the whole app works end to end.
 
 ```
-backend/
-├── main.py               ← entry point, wires everything together
-├── core/                 ← shared foundation (config, settings, secrets, LLM)
-├── auth/                 ← Gmail OAuth
-├── providers/            ← LLM providers (Claude, OpenAI, Gemini, Ollama)
-└── modules/
-    └── mailmind/         ← the email AI feature
+┌─────────────────────────────────────────────────────────────┐
+│                    TAURI DESKTOP WINDOW                     │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │              REACT FRONTEND (Vite)                    │  │
+│  │  App.jsx → decides which page to show                 │  │
+│  │    ↓                                                  │  │
+│  │  LocationPicker → Setup wizard → Shell (main UI)      │  │
+│  └────────────────────┬──────────────────────────────────┘  │
+│                       │  HTTP requests to localhost:8000     │
+└───────────────────────┼─────────────────────────────────────┘
+                        │
+┌───────────────────────▼─────────────────────────────────────┐
+│              FASTAPI BACKEND (Python)                        │
+│                                                             │
+│  main.py  →  mounts all routers                             │
+│                                                             │
+│  core/          →  config, settings, secrets, LLM dispatch  │
+│  auth/          →  Gmail OAuth2                             │
+│  providers/     →  Ollama, Claude, OpenAI, Gemini           │
+│  modules/       →  module registry                          │
+│    mailmind/    →  all email AI logic                       │
+│                                                             │
+│  Data on disk:                                              │
+│    ~/Desktop/forgemind/                                     │
+│      settings.json      ← all app + module settings         │
+│      keys.enc           ← encrypted API keys + Gmail token  │
+│      master.key         ← Fernet encryption key             │
+│      client_secret.json ← Gmail OAuth credential            │
+│      mailmind_emails.json ← all cached emails               │
+│      mailmind_blocklist.json ← blocked senders              │
+│      chromadb/MailMind/ ← vector embeddings                 │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-**Data flow at the highest level:**
+### App startup sequence
 
-User confirms workspace folder → app stores settings and secrets locally → Gmail OAuth → emails fetched → LLM processes them → results stored locally on disk. Nothing leaves the machine unless a cloud LLM provider is selected.
+1. Tauri launches the Python backend as a sidecar process
+2. Python starts uvicorn on `127.0.0.1:8000`
+3. React frontend loads in the Tauri webview
+4. `App.jsx` calls `GET /api/setup/status`
+5. If first run → show `LocationPicker` → user confirms workspace folder
+6. Then → show Setup wizard (provider, Gmail, hours, profile)
+7. Then → show main Shell with MailMind
+
+### Request flow for every action
+
+```
+User clicks something in UI
+      ↓
+Frontend API function called (e.g. mailmindApi.fetchInbox())
+      ↓
+HTTP request sent to backend (e.g. POST /api/modules/mailmind/emails/fetch)
+      ↓
+FastAPI route handler in routes.py
+      ↓
+Service function in service.py (business logic)
+      ↓
+Reads/writes: Gmail API | LLM | store.py | chroma.py
+      ↓
+JSON response returned to frontend
+      ↓
+React state updated → UI re-renders
+```
 
 ---
 
 ## main.py
 
-This is the **entry point** of the entire backend. Its only job is to create the FastAPI app, add middleware, and register all the routers. It deliberately knows nothing about specific modules — it just wires everything together in one place.
+The **entry point**. Creates the FastAPI app, adds CORS middleware, and mounts all routers. It knows nothing about specific modules.
 
 ---
 
@@ -34,120 +85,86 @@ This is the **entry point** of the entire backend. Its only job is to create the
 
 **Route:** `GET /`
 
-**Triggered by:** Nothing in the normal app flow. This is a health check endpoint. It could be called manually in a browser or by a monitoring tool to confirm the backend is alive.
+**Triggered by:** Nothing in normal app flow. Manual health check only.
 
-**Calls internally:** Nothing. It just returns a plain dictionary with the app name, version, and status string.
+**Calls internally:** Nothing.
 
-This is a simple health check endpoint. When called, it returns the app name, version, and a status of "running". It does nothing else.
-
----
-
-### Key lines worth understanding
-
-**`app = FastAPI(...)`**
-This creates the FastAPI application instance. Everything — middleware, routes, modules — is attached to this single object. FastAPI is a Python web framework that handles incoming HTTP requests and routes them to the correct function.
-
-**`app.add_middleware(CORSMiddleware, ...)`**
-CORS (Cross-Origin Resource Sharing) is a browser security rule. When the frontend (running at `localhost:5173` or inside the Tauri webview) makes a request to the backend (running at `localhost:8000`), the browser blocks it by default because the two have different origins. This middleware tells the browser "it is okay, allow requests from these specific origins." Without this, every API call from the frontend would fail.
-
-**`app.include_router(...)`**
-FastAPI lets you split routes across multiple files using "routers." Each router is a group of related endpoints. These four lines attach the setup, auth, providers, and meta routers to the main app so their endpoints become available.
-
-**`mount_all(app)`**
-This is how modules are dynamically registered. Instead of hardcoding every module in main.py, `mount_all` reads the module registry and attaches each module's router automatically. This means adding a new module never requires touching main.py.
+Returns the app name, version, and `"running"` status. Used to confirm the backend is alive.
 
 ---
 
-### Overall Flow
+### Key lines
 
-1. Python imports main.py and runs it
-2. A FastAPI app object is created
-3. CORS middleware is added so the frontend can communicate with the backend
-4. All routers are attached — setup, auth, providers, meta, and all modules
-5. The app is now ready to receive HTTP requests from the frontend
+**`app = FastAPI(...)`** — Creates the FastAPI application instance that everything attaches to.
+
+**`app.add_middleware(CORSMiddleware, ...)`** — Without this, the browser blocks every request from the frontend to the backend because they run on different ports. This middleware tells the browser to allow requests from the listed origins (localhost:5173, Tauri webview URLs).
+
+**`app.include_router(...)`** — Attaches each router's endpoints to the app. Four calls: setup, auth, providers, meta.
+
+**`mount_all(app)`** — Reads the module registry and attaches every module's router automatically. Adding a new module never requires touching main.py.
 
 ---
 
 ## core/config.py
 
-This file has one responsibility: **deciding where all app data lives on disk**. It manages the workspace folder path and makes sure every other part of the app uses the same path. No other file should hardcode a path like `~/Desktop/forgemind` — they all import `DATA_DIR` from here.
+Manages **where all app data lives on disk**. Every other file imports `DATA_DIR` from here instead of hardcoding paths.
 
 ---
 
 ### `default_data_dir()`
 
-**Triggered by:** Two places. First, when `_resolve()` calls it at import time if no bootstrap file exists. Second, when the frontend calls `GET /api/setup/status` — the response includes `default_dir` which is the return value of this function, used to pre-fill the input box in `LocationPicker`.
+**Triggered by:** Two places — `_resolve()` at import time as fallback, and `setup_status()` to pre-fill the location picker input.
 
-**Calls internally:** Nothing. It only uses Python's `Path` to check if the Desktop folder exists and return the appropriate path.
+**Calls internally:** Nothing. Uses `Path.home()` and `Path.exists()`.
 
-This function computes what the workspace folder path *should* be if the user has not chosen one yet. It checks if a `Desktop` folder exists in the user's home directory. If it does, it returns `~/Desktop/forgemind`. If not (some Linux setups have no Desktop), it falls back to `~/forgemind`.
-
-This function does **not** create any folder. It only returns a `Path` object representing where the folder would be.
+Returns `~/Desktop/forgemind` if Desktop exists, otherwise `~/forgemind`. Does not create anything — only computes the path.
 
 ---
 
 ### `_resolve()`
 
-**Triggered by:** Automatically at import time — when Python first loads `config.py`, this function runs immediately to set the initial value of `DATA_DIR`. It is never called again after that.
+**Triggered by:** Automatically at import time to set the initial `DATA_DIR`. Never called again.
 
-**Calls internally:** `default_data_dir()` — only if `~/.forgemind-location` does not exist, as a fallback.
+**Calls internally:** `default_data_dir()` — only if `~/.forgemind-location` does not exist.
 
-This function runs once when the module is first imported at app startup. Its job is to figure out what `DATA_DIR` should be set to initially.
-
-It checks if `~/.forgemind-location` exists. This is a tiny text file that holds just one line — the path the user chose on their first run. If the file exists, `_resolve()` reads that path and returns it. If the file does not exist (meaning it is the first ever launch), it falls back to `default_data_dir()`.
+Checks if `~/.forgemind-location` exists. If yes, reads and returns the saved path. If no, returns `default_data_dir()`. Sets the initial value of `DATA_DIR`.
 
 ---
 
 ### `is_first_run()`
 
-**Triggered by:** The frontend calling `GET /api/setup/status` on every app startup. `setup_routes.py` calls this function to build the response. Also called once at the bottom of `config.py` itself at import time to decide whether to create the data directory.
+**Triggered by:** `GET /api/setup/status` on every app start. Also called at the bottom of config.py at import time.
 
-**Calls internally:** Nothing. It just checks whether `~/.forgemind-location` exists using `Path.exists()`.
+**Calls internally:** Nothing. Just checks `Path.exists()` on `~/.forgemind-location`.
 
-This function answers a simple yes/no question: has the user ever confirmed a workspace location before? If `~/.forgemind-location` does not exist, this is a first run and it returns `True`. If the file exists, the user has been through setup before and it returns `False`.
+Returns `True` if the bootstrap file does not exist (never set up), `False` if it does.
 
 ---
 
 ### `set_data_dir(path)`
 
-**Triggered by:** The frontend calling `POST /api/setup/location` when the user clicks "Create my workspace" in the `LocationPicker`. `setup_routes.py → set_location()` calls this function with the path the user chose.
+**Triggered by:** `POST /api/setup/location` when the user clicks "Create my workspace" in `LocationPicker.jsx`.
 
-**Calls internally:** Nothing from this codebase. It uses Python's built-in `Path.mkdir()` and `Path.write_text()` directly.
+**Calls internally:** `Path.mkdir()` and `Path.write_text()` — Python built-ins, nothing from this codebase.
 
-This is the function that does the actual work when the user confirms a location. It does three things in sequence:
-
-1. **Creates the folder on disk** using `path.mkdir(parents=True, exist_ok=True)`. `parents=True` means it creates any missing parent folders too. `exist_ok=True` means it does not crash if the folder already exists.
-
-2. **Writes the path to `~/.forgemind-location`** so the app remembers the location across restarts. The next time the app launches, `_resolve()` reads this file.
-
-3. **Updates the in-memory `DATA_DIR` variable** immediately. This is important because the rest of the app reads `DATA_DIR` at runtime. By updating it here, all other parts of the app switch to the new path right away without needing a restart.
+Does three things in order:
+1. Creates the workspace folder with `mkdir(parents=True, exist_ok=True)`
+2. Writes the path to `~/.forgemind-location` so it survives restarts
+3. Updates the global `DATA_DIR` variable in memory so the rest of the app uses it immediately
 
 ---
 
 ### Key Variables
 
-**`_BOOTSTRAP`**
-`~/.forgemind-location` — a tiny file in the user's home directory containing a single line: the full path to the workspace folder. This is the only file ForgeMind writes outside the workspace folder itself. It is what `is_first_run()` and `_resolve()` both check.
+**`_BOOTSTRAP`** — `~/.forgemind-location`. The only file ForgeMind writes outside the workspace.
 
-**`DATA_DIR`**
-The most important variable in the whole config file. It holds the current workspace path. Every other file imports this and uses it to construct their own paths — for example `DATA_DIR / "settings.json"` or `DATA_DIR / "keys.enc"`. It starts with the value returned by `_resolve()` and gets updated when `set_data_dir()` is called.
-
----
-
-### Overall Flow
-
-1. App starts, Python imports `config.py`
-2. `_resolve()` runs immediately and sets `DATA_DIR` to either the saved path or the default
-3. `is_first_run()` is checked — if not first run, the workspace folder is created if it somehow got deleted
-4. Frontend calls `GET /api/setup/status` → `is_first_run()` tells it whether to show `LocationPicker`
-5. User confirms a location → frontend calls `POST /api/setup/location` → `set_data_dir()` creates the folder, saves the path, updates `DATA_DIR`
-6. From this point on, all files use `DATA_DIR` to know where to read and write data
+**`DATA_DIR`** — The current workspace path. Set at import time by `_resolve()`, updated by `set_data_dir()`. Every other file uses this to build their paths.
 
 ---
 
 ## core/setup_routes.py
 
-This file handles the **first-run setup flow**. It exposes two API endpoints that the frontend calls to check the setup state and confirm a workspace location.
+Two API endpoints for the **first-run flow**.
 
 ---
 
@@ -155,18 +172,13 @@ This file handles the **first-run setup flow**. It exposes two API endpoints tha
 
 **Route:** `GET /api/setup/status`
 
-**Triggered by:** The frontend (`App.jsx`) calls this automatically every time the app starts, before deciding which page to show the user.
+**Triggered by:** `App.jsx` calls this on every app startup to decide which page to show.
 
 **Calls internally:**
-- `config.is_first_run()` — to check if this is the first ever launch
-- `config.default_data_dir()` — to get the default path for the `default_dir` field in the response
+- `config.is_first_run()` — checks bootstrap file existence
+- `config.default_data_dir()` — for the `default_dir` field in response
 
-This function returns three pieces of information to the frontend:
-- `first_run` — whether this is the first ever launch
-- `data_dir` — the current workspace path
-- `default_dir` — what the default path would be (used to pre-fill the input box)
-
-The frontend uses `first_run` to decide which page to show. If `true`, it shows `LocationPicker`. If `false`, it checks Gmail auth status and goes to the main shell.
+Returns `{ first_run, data_dir, default_dir }`. Frontend uses `first_run` to decide: `true` → show LocationPicker, `false` → check Gmail auth.
 
 ---
 
@@ -174,412 +186,1248 @@ The frontend uses `first_run` to decide which page to show. If `true`, it shows 
 
 **Route:** `POST /api/setup/location`
 
-**Triggered by:** The frontend (`LocationPicker.jsx`) calls this when the user clicks "Create my workspace →". The chosen path is sent in the request body.
+**Triggered by:** `LocationPicker.jsx` calls this when user clicks "Create my workspace →".
 
 **Calls internally:**
-- `config.set_data_dir(path)` — creates the folder, saves bootstrap file, updates `DATA_DIR`
-- `mailmind_settings.load()` — reads current mailmind settings to check if `chroma_path` is already set
-- `mailmind_settings.save(s)` — saves the updated mailmind settings with the default `chroma_path`
+- `config.set_data_dir(path)` — creates folder, saves bootstrap, updates DATA_DIR
+- `mailmind_settings.load()` — checks if `chroma_path` is already set
+- `mailmind_settings.save(s)` — saves default `chroma_path` if not already set
 
-This function does two things. First, it calls `set_data_dir()` to physically create the workspace folder and remember its location. Second, it checks if MailMind's `chroma_path` has been set — if not, it automatically sets it to `<workspace>/chromadb/MailMind`. This happens here because the workspace path was only just confirmed and ChromaDB needs somewhere to store its files.
-
----
-
-### Overall Flow
-
-1. App starts → frontend calls `GET /api/setup/status`
-2. If `first_run: true` → frontend shows `LocationPicker`
-3. User types or accepts the default path and confirms
-4. Frontend calls `POST /api/setup/location` with the path
-5. Backend creates the workspace folder, saves the location, sets mailmind's chroma path
-6. Frontend moves on to the Setup wizard (provider, Gmail, hours, profile)
+Creates the workspace folder, then auto-sets MailMind's ChromaDB path to `<workspace>/chromadb/MailMind` if not already configured. This happens here because the workspace location was just confirmed — only now is there a known place to put ChromaDB.
 
 ---
 
 ## core/settings.py
 
-This file manages **all app configuration** in a single `settings.json` file inside the workspace folder. It uses a scoped system so global settings (like which AI provider is active) and module settings (like MailMind's working hours) are kept cleanly separated and never overwrite each other.
+All app configuration in a **single `settings.json`** file. Scoped system keeps global and module settings separated.
 
 ---
 
 ### `_deep_merge(base, override)`
 
-**Triggered by:** Called internally by `load_all()` and `ModuleSettings.load()` — never called directly from outside this file.
+**Triggered by:** Called inside `load_all()` and `ModuleSettings.load()` — never from outside this file.
 
-**Calls internally:** Calls itself recursively when it encounters a nested dictionary inside the settings.
+**Calls internally:** Itself recursively when nested dicts are found.
 
-This is a helper function that merges two dictionaries together. The `override` dict wins whenever there is a conflict on a key. If both dicts have the same key and both values are dictionaries, it merges those nested dicts too instead of just replacing one with the other.
-
-The reason this exists: every time settings are loaded from disk, they are merged with the hardcoded defaults. This means if a new version of the app adds a new setting key that the user's saved `settings.json` does not have yet, the default value is automatically filled in. Without this, adding new settings would require a migration script.
+Merges two dicts where `override` wins on conflicts. Nested dicts are merged recursively instead of replaced. This is how the app always has complete settings even when `settings.json` only stores the user's changes from defaults.
 
 ---
 
 ### `load_all()`
 
-**Triggered by:** Called every single time any setting is read anywhere in the app. Specifically called by:
-- `setup_status()` indirectly when it reads `DATA_DIR`
-- `ModuleSettings.load()` to get the full file before extracting the module's section
-- `ModuleSettings.save()` to get the full file before updating the module's section
-- `get()` and `set_value()` for global settings reads and writes
-- `llm.py` when reading `active_provider` and `models`
+**Triggered by:** On every single settings read anywhere in the app — every LLM call, every route that needs settings, every module settings read or write.
 
-**Calls internally:** `_deep_merge(GLOBAL_DEFAULTS, stored)` — to merge the saved file with defaults.
+**Calls internally:** `_deep_merge(GLOBAL_DEFAULTS, stored)`.
 
-This function reads `settings.json` from disk and returns the full settings dictionary merged with `GLOBAL_DEFAULTS`. If the file does not exist yet or is corrupted, it just returns the defaults. Settings are always read fresh from disk — never cached — so manual edits to `settings.json` take effect on the next request without a restart.
+Reads `settings.json` from disk, merges with `GLOBAL_DEFAULTS`, returns the full dict. If the file does not exist or is corrupt, returns just the defaults. Always reads fresh from disk — no caching.
 
 ---
 
 ### `save_all(data)`
 
-**Triggered by:** Never called directly from outside this file. Called internally by `set_value()` and `ModuleSettings.save()` after they update their respective sections.
+**Triggered by:** `set_value()` and `ModuleSettings.save()` after updating their sections.
 
-**Calls internally:** Nothing. It just calls Python's built-in `json.dumps()` and `Path.write_text()` to write the file.
+**Calls internally:** Nothing. Just `json.dumps()` and `Path.write_text()`.
 
-Takes the full settings dictionary and writes it to `settings.json` as formatted JSON. Completely overwrites the file each time. This is the only function that writes to `settings.json`.
+Overwrites `settings.json` with the full settings dict. The only function that writes to this file.
 
 ---
 
 ### `get(key, default)`
 
-**Triggered by:** Called by `llm.py` to read `active_provider` and `models` before every LLM call. Also called by any route that needs a global setting.
+**Triggered by:** `llm.py` on every LLM call to read `active_provider` and `models`. Provider routes. Daemon to read work hours.
 
-**Calls internally:** `load_all()` — reads the full settings file, then picks out the one key requested.
+**Calls internally:** `load_all()`.
 
-A convenience function for reading a single top-level global setting. For example, `get("active_provider")` returns whichever provider is currently selected (`"ollama"`, `"claude"`, etc.).
+Reads one top-level global setting by key.
 
 ---
 
 ### `set_value(key, value)`
 
-**Triggered by:** Called by provider routes when the user switches the active provider or changes a model in Settings.
+**Triggered by:** Provider routes when user switches provider or changes a model in Settings.
 
-**Calls internally:**
-- `load_all()` — to get the current full settings before modifying
-- `save_all(data)` — to write the updated settings back to disk
+**Calls internally:** `load_all()` then `save_all(data)`.
 
-A convenience function for writing a single top-level global setting. It loads all settings, updates the one key, and saves everything back. Other keys are untouched.
+Writes one top-level global setting. Loads full file, updates the one key, saves everything back.
 
 ---
 
 ### `module_settings(module_id, defaults)`
 
-**Triggered by:** Called once by each module at import time to create its scoped settings object. For example, `modules/mailmind/settings.py` calls this with `module_id="mailmind"` when the module is first loaded.
+**Triggered by:** Each module calls this once at import time (e.g. `modules/mailmind/settings.py`).
 
-**Calls internally:** Just creates and returns a new `ModuleSettings` instance — no file reads happen here.
+**Calls internally:** Creates and returns a `ModuleSettings` instance. No file reads.
 
-A factory function that creates a `ModuleSettings` object for a specific module. Each module calls this once to get its own scoped view of `settings.json`.
+Factory that creates a scoped settings object for a module.
 
 ---
 
 ### Class: `ModuleSettings`
 
-This class gives each module a scoped view of `settings.json`. The module only sees and touches its own section under `modules.<id>`.
-
----
-
-#### `__init__(module_id, defaults)`
-
-**Triggered by:** Called when `module_settings()` factory function is called at module import time.
-
-**Calls internally:** Nothing. Just stores the module ID and defaults on `self`.
-
-Stores the module's ID and its default settings. These defaults are used every time settings are loaded to fill in any missing keys.
+Scoped settings view for one module. Module settings live under `modules.<id>` in `settings.json`.
 
 ---
 
 #### `load()`
 
-**Triggered by:** Called whenever a module needs to read its settings. For example, when the frontend opens Settings and the backend needs to return MailMind's current config. Also called in `set_location()` to check if `chroma_path` is already set.
+**Triggered by:** Any time a module reads its settings — opening Settings UI, before LLM calls that need user_name/work_hours, checking chroma_path.
 
-**Calls internally:**
-- `load_all()` — reads the full `settings.json` from disk
-- `_deep_merge(self.defaults, stored)` — merges the module's saved section with its own defaults
+**Calls internally:** `load_all()` then `_deep_merge(self.defaults, stored)`.
 
-Reads the full `settings.json`, navigates to `modules.<id>`, and merges that section with the module's own defaults. Returns just the module's settings as a plain dictionary. If the module has never saved settings before, returns the defaults.
+Reads `settings.json`, extracts `modules.<id>`, merges with module defaults. Returns just this module's settings.
 
 ---
 
 #### `save(data)`
 
-**Triggered by:** Called when a module needs to persist its settings. For example, when the user changes MailMind settings in the UI and hits Save. Also called in `set_location()` to save the default `chroma_path`.
+**Triggered by:** When user saves settings in UI (`POST /api/modules/mailmind/settings`). Also by `set_location()` to save default chroma_path. And by `_save_history_id()` to persist the Gmail historyId.
 
-**Calls internally:**
-- `load_all()` — reads the full file first so other sections are not lost
-- `save_all(all_settings)` — writes the full file back after updating just this module's section
+**Calls internally:** `load_all()` then `save_all(all_settings)`.
 
-Takes the module's settings dictionary and saves it into `settings.json` under `modules.<id>`. It loads the full file first, updates only the module's section, and writes everything back. Other modules' settings and global settings are untouched.
+Loads full file, updates only `modules.<id>`, writes full file back. Other modules and global settings untouched.
 
 ---
 
 #### `get(key, default)` and `set(key, value)`
 
-**Triggered by:** Convenience wrappers used by modules to read or write a single key without loading and saving manually.
-
-**Calls internally:**
-- `get` calls `self.load()`
-- `set` calls `self.load()` then `self.save()`
-
----
-
-### Overall Flow
-
-```
-settings.json structure:
-{
-  "active_provider": "ollama",       ← global, read by llm.py
-  "models": { ... },                 ← global, read by llm.py
-  "modules": {
-    "mailmind": { ... }              ← module-scoped, only MailMind reads/writes this
-  }
-}
-```
-
-- Every read goes through `load_all()` which merges with defaults via `_deep_merge`
-- Global settings are read with `get()` and written with `set_value()`
-- Module settings are read with `ModuleSettings.load()` and written with `ModuleSettings.save()`
-- A module can never accidentally touch another module's section or the global section
+Convenience wrappers. `get` calls `self.load()`. `set` calls `self.load()` then `self.save()`.
 
 ---
 
 ## core/secret_store.py
 
-This file handles **storing API keys and sensitive values securely on disk**. It uses Fernet symmetric encryption. If the `cryptography` library is not installed, it falls back to storing keys in plaintext with a warning.
+**Encrypted storage for API keys and the Gmail OAuth token**. Uses Fernet symmetric encryption. Gracefully falls back to plaintext if the `cryptography` package is not installed.
 
 ---
 
-### `_keys_enc()`
+### `_keys_enc()`, `_keys_plain()`, `_master_key()`
 
-**Triggered by:** Called inside `load_keys()` and `_write_keys()` to get the path for the encrypted file.
+**Triggered by:** Called inside `load_keys()`, `_write_keys()`, `_get_fernet()` to get file paths.
 
-**Calls internally:** Nothing. Returns `config.DATA_DIR / "keys.enc"`.
+**Calls internally:** Nothing. Return `config.DATA_DIR / <filename>`.
 
-Returns the path to `keys.enc`. This is a function (not a variable) because `DATA_DIR` might change after import when `set_data_dir()` is called. By computing the path at call time it always reflects the current workspace.
-
----
-
-### `_keys_plain()`
-
-**Triggered by:** Called inside `load_keys()` and `_write_keys()` as the fallback path when encryption is unavailable.
-
-**Calls internally:** Nothing. Returns `config.DATA_DIR / "keys.json"`.
-
-Returns the path to `keys.json`. Only used when the `cryptography` library is not installed.
-
----
-
-### `_master_key()`
-
-**Triggered by:** Called inside `_get_fernet()` to locate the encryption key file.
-
-**Calls internally:** Nothing. Returns `config.DATA_DIR / "master.key"`.
-
-Returns the path to `master.key` — the file containing the Fernet encryption key. If this file is deleted, all keys in `keys.enc` become permanently unreadable.
+These are functions (not variables) because `DATA_DIR` can change at runtime when the user sets a workspace location. Computing paths at call time ensures they always point to the right place.
 
 ---
 
 ### `_have_crypto()`
 
-**Triggered by:** Called at the start of `load_keys()` and `_write_keys()` to decide which path to take — encrypted or plaintext.
+**Triggered by:** First check inside `load_keys()` and `_write_keys()` to decide encrypt vs plaintext path.
 
-**Calls internally:** Nothing. Just attempts to import the `cryptography` package and returns `True` or `False`.
-
-Checks whether the `cryptography` Python package is installed. Returns `True` if available, `False` if not.
+**Calls internally:** Nothing. Attempts to import `cryptography`, returns `True` or `False`.
 
 ---
 
 ### `_get_fernet()`
 
-**Triggered by:** Called inside `load_keys()` when decrypting and inside `_write_keys()` when encrypting. Only called if `_have_crypto()` returned `True`.
+**Triggered by:** `load_keys()` when decrypting. `_write_keys()` when encrypting. Only called if `_have_crypto()` is True.
 
 **Calls internally:**
-- `_master_key()` — to get the path to the key file
-- Python's `Fernet.generate_key()` — only on first ever use, to create a new random encryption key
-- `os.chmod()` — to set file permissions to owner-only (600)
+- `_master_key()` — to get the key file path
+- `Fernet.generate_key()` — only on first ever use to create the key
+- `os.chmod()` — sets file to owner-only (600)
 
-Gets the Fernet encryption object. If `master.key` does not exist yet, it generates a new random encryption key and writes it to `master.key` with `chmod 600`. Then reads `master.key` and creates a `Fernet` object using that key.
+Creates and returns the Fernet encryption object. On first ever use, generates a random 32-byte key and writes it to `master.key` with `chmod 600`. After that, just reads the existing key and creates the Fernet object.
 
 ---
 
 ### `load_keys()`
 
-**Triggered by:** Called by `get_key()`, `save_key()`, and `delete_key()` every time they need the current set of keys. Also called by `llm.py` indirectly through `get_key()` before every LLM API call.
+**Triggered by:** `get_key()`, `save_key()`, `delete_key()` — so effectively every time an API key is read or written. Also indirectly by `llm.py` through `get_key()` before every cloud LLM request.
 
-**Calls internally:**
-- `_have_crypto()` — to decide whether to use encrypted or plaintext path
-- `_keys_enc()` — to get the encrypted file path
-- `_get_fernet()` — to get the decryption object
-- `_keys_plain()` — as fallback if no encryption
+**Calls internally:** `_have_crypto()`, `_keys_enc()`, `_get_fernet()`, `_keys_plain()`.
 
-Loads and returns all stored API keys as a plain dictionary, for example `{ "claude": "sk-ant-...", "openai": "sk-..." }`. Decrypts `keys.enc` if available, falls back to reading `keys.json`, returns an empty dict if neither exists.
+Decrypts `keys.enc` and returns all stored keys as a plain dict like `{ "claude": "sk-ant-...", "openai": "sk-..." }`. Falls back to `keys.json` if not encrypted. Returns empty dict if nothing exists.
 
 ---
 
 ### `_write_keys(keys)`
 
-**Triggered by:** Called by `save_key()` and `delete_key()` after they modify the keys dictionary.
+**Triggered by:** `save_key()` and `delete_key()` after modifying the keys dict.
 
-**Calls internally:**
-- `_have_crypto()` — to decide encrypt or plaintext
-- `_get_fernet()` — to get the encryption object
-- `_keys_enc()` — to get the encrypted file path
-- `_keys_plain()` — to delete the plaintext file if switching to encrypted
-- `os.chmod()` — to set file permissions to 600
+**Calls internally:** `_have_crypto()`, `_get_fernet()`, `_keys_enc()`, `_keys_plain()`, `os.chmod()`.
 
-Takes the full dictionary of keys and writes it to disk. Always writes the complete dictionary — never just one key — because the encrypted file stores everything together. Sets `chmod 600` on the written file.
+Encrypts the full keys dict and writes to `keys.enc`. Deletes `keys.json` if switching from plaintext to encrypted. Sets `chmod 600` on the written file. Always writes the complete dict — never just one key.
 
 ---
 
 ### `save_key(name, value)`
 
-**Triggered by:** Called when the user enters an API key in Settings and hits Save. Also called in `Setup.jsx → finish()` when the user completes the first-run wizard.
+**Triggered by:** User saves an API key in Settings (`POST /api/providers/key`). Also in the Setup wizard when finishing first-run.
 
-**Calls internally:**
-- `load_keys()` — to get all existing keys first
-- `_write_keys(keys)` — to write the updated dictionary back to disk
-
-Saves one API key by name. Loads all existing keys, adds or updates the one key, writes everything back. Never writes just one key in isolation — always rewrites the whole encrypted file.
+**Calls internally:** `load_keys()` → modify dict → `_write_keys(keys)`.
 
 ---
 
 ### `delete_key(name)`
 
-**Triggered by:** Called when the user removes an API key from Settings.
+**Triggered by:** User removes an API key in Settings (`DELETE /api/providers/key/<id>`).
 
-**Calls internally:**
-- `load_keys()` — to get current keys
-- `_write_keys(keys)` — to write back without the deleted key
-
-Removes one key by name. If the key does not exist, nothing happens.
+**Calls internally:** `load_keys()` → remove entry → `_write_keys(keys)`.
 
 ---
 
 ### `get_key(name)`
 
-**Triggered by:** Called by `llm.py → llm_generate()` and `llm_stream()` before every cloud LLM request to fetch the API key for the active provider.
+**Triggered by:** `llm.py` before every cloud provider request. `providers/routes.py` to check if a key exists.
 
-**Calls internally:** `load_keys()` — decrypts the file and returns the full dict, then picks out the requested key.
+**Calls internally:** `load_keys()` — decrypts and returns dict, picks out the one key.
 
-Returns the value of one key by name, or `None` if it does not exist.
-
----
-
-### Overall Flow
-
-```
-User enters API key in Settings UI
-      ↓
-Frontend calls POST /api/providers/key
-      ↓
-save_key("claude", "sk-ant-...") is called
-      ↓
-load_keys() → decrypts keys.enc → returns current dict
-      ↓
-New key added to dict
-      ↓
-_write_keys() → encrypts full dict → writes to keys.enc (chmod 600)
-
-────────────────────────────────────────────
-
-User triggers an LLM call (e.g. summarise email)
-      ↓
-llm_generate() calls get_key("claude")
-      ↓
-load_keys() → decrypts keys.enc → picks "claude" key
-      ↓
-Key returned to llm_generate() → used in API request
-```
+Returns the key value or `None`.
 
 ---
 
 ## core/llm.py
 
-This file is the **single entry point for all AI model calls** in the app. Every module that needs to talk to an LLM calls a function from here. Modules never import a specific provider directly — they always go through `llm.py`. This means the user can switch providers in Settings and every module automatically uses the new one.
+**Single entry point for all AI calls**. Every module goes through here. Never import a specific provider directly in a module — always use this.
 
 ---
 
 ### `_provider_class(pid)`
 
-**Triggered by:** Called internally by both `llm_generate()` and `llm_stream()` before making a request, to check whether the provider requires an API key.
+**Triggered by:** `llm_generate()` and `llm_stream()` internally.
 
-**Calls internally:** Imports `PROVIDERS` registry from `providers/__init__.py` and looks up the class by ID.
+**Calls internally:** Imports `PROVIDERS` from `providers/__init__.py`.
 
-A private helper that looks up the provider class by its ID string (e.g. `"claude"`, `"ollama"`). If the ID is not in the registry, raises an HTTP 500 error. This function exists so `llm_generate` and `llm_stream` can check `cls.requires_api_key` before trying to fetch one from the secret store.
+Looks up the provider class by ID. If the ID is not in the registry, raises HTTP 500.
 
 ---
 
 ### `llm_generate(prompt)`
 
-**Triggered by:** Called by modules whenever they need a complete AI response as a string. For example, MailMind calls this for contact summarisation, compose drafting, and reply drafting in non-streaming mode.
+**Triggered by:** Modules needing a complete response — `summarise()`, `draft_reply()`, `draft_compose()`, `summarise_contacts()`.
 
 **Calls internally:**
-- `app_settings.get("active_provider")` — reads which provider is active from `settings.json`
-- `app_settings.get("models")` — reads the model name for that provider
-- `_provider_class(pid)` — checks if an API key is required
-- `secret_store.get_key(pid)` — fetches the API key if needed
-- `get_provider(pid, api_key=api_key)` — instantiates the provider
-- `provider.generate(prompt, model=model)` — sends the prompt and returns the full response
+- `app_settings.get("active_provider")` — which provider is selected
+- `app_settings.get("models")` — which model for that provider
+- `_provider_class(pid)` — checks `requires_api_key`
+- `secret_store.get_key(pid)` — fetches API key if needed
+- `get_provider(pid, api_key=api_key)` — creates provider instance
+- `provider.generate(prompt, model=model)` — sends the request
 
-Sends a prompt to the active AI provider and returns the complete response as a string. The module calling this never knows which provider ran — it just gets back text.
-
-Step by step:
-1. Reads `active_provider` from settings
-2. Gets the model name for that provider
-3. Checks if the provider needs an API key — if yes, fetches it from `secret_store`. If the key is missing, raises a 400 error
-4. Creates the provider instance
-5. Calls `provider.generate()` and returns the string result
+Sends a prompt, waits for the full response, returns it as a string. If the provider needs a key and it is missing, raises HTTP 400.
 
 ---
 
 ### `llm_stream(prompt)`
 
-**Triggered by:** Called by modules when they want to stream the response token by token so the UI can show text appearing word by word. MailMind calls this for email summarisation so the summary streams in live.
+**Triggered by:** Modules that stream responses token by token — `summarise_stream()` so the UI shows text appearing live.
 
-**Calls internally:** Same as `llm_generate` — `app_settings.get()`, `_provider_class()`, `secret_store.get_key()`, `get_provider()` — but then calls `provider.generate_stream()` instead of `provider.generate()`.
+**Calls internally:** Same as `llm_generate` but calls `provider.generate_stream()` instead of `provider.generate()`.
 
-Does the same thing as `llm_generate` but instead of waiting for the full response, it yields tokens one by one as they arrive using Python's `yield from`. The frontend receives each token as it is generated and appends it to what is already shown on screen. For providers that do not support streaming, it yields the entire response as a single chunk so the interface still works.
-
----
-
-### Overall Flow
-
-```
-Module calls llm_generate(prompt) or llm_stream(prompt)
-      ↓
-Reads active_provider from settings.json  (e.g. "ollama")
-      ↓
-Reads model for that provider  (e.g. "qwen2.5:1.5b")
-      ↓
-Checks if provider requires API key
-  → Yes: fetches from secret_store → missing key = 400 error
-  → No (Ollama): skips key fetch
-      ↓
-Instantiates provider
-      ↓
-Calls provider.generate() or provider.generate_stream()
-      ↓
-Returns result to the module that called it
-```
-
-The module never knows or cares which provider ran. Switching from Ollama to Claude in Settings requires zero code changes in any module.
+Yields tokens one by one using `yield from`. Providers that don't support streaming yield the full response as a single chunk.
 
 ---
 
-## What's Next
+## auth/gmail.py
 
-| File | Folder |
-|------|--------|
-| `gmail.py` | `auth/` |
-| `routes.py` | `auth/` |
-| `settings.py` | `modules/mailmind/` |
-| `store.py` | `modules/mailmind/` |
-| `chroma.py` | `modules/mailmind/` |
-| `parsing.py` | `modules/mailmind/` |
-| `prompts.py` | `modules/mailmind/` |
-| `service.py` | `modules/mailmind/` |
-| `routes.py` | `modules/mailmind/` |
-| `base.py` | `providers/` |
-| `claude.py` | `providers/` |
-| `openai.py` | `providers/` |
-| `gemini.py` | `providers/` |
-| `ollama.py` | `providers/` |
-| `routes.py` | `providers/` |
+All **Gmail OAuth2 and Gmail API operations**. This is the only file that talks to Google.
+
+---
+
+### `_client_secret_file()`
+
+**Triggered by:** `_make_flow()` when building the OAuth flow.
+
+**Calls internally:** `config.DATA_DIR` — function not variable, so it always uses the current workspace path.
+
+Returns the path to `client_secret.json` inside the workspace folder. This file must be downloaded by the user from Google Cloud Console.
+
+---
+
+### `_load_credentials()`
+
+**Triggered by:** `is_authenticated()` and `get_gmail_service()` on every operation that needs Gmail access.
+
+**Calls internally:**
+- `secret_store.get_key(_TOKEN_KEY)` — loads the saved OAuth token JSON
+- `creds.refresh(Request())` — auto-refreshes the token if expired, saves the refreshed version
+
+Loads the saved Gmail OAuth token from encrypted storage. If the token is expired but has a refresh token, automatically refreshes it and saves the new one. Returns `None` if not authenticated or if anything fails.
+
+---
+
+### `_save_credentials(creds)`
+
+**Triggered by:** `handle_callback()` after the user completes the OAuth flow. Also by `_load_credentials()` after a token refresh.
+
+**Calls internally:** `secret_store.save_key(_TOKEN_KEY, creds.to_json())`.
+
+Serialises the OAuth credentials to JSON and saves them to encrypted storage under the key `"gmail_oauth_token"`.
+
+---
+
+### `_make_flow()`
+
+**Triggered by:** `get_auth_url()` when the user initiates the Gmail sign-in.
+
+**Calls internally:** `_client_secret_file()` — to locate `client_secret.json`.
+
+Creates a Google OAuth2 `Flow` object from `client_secret.json`. Raises `RuntimeError` if the file does not exist, with a clear message explaining where to get it.
+
+---
+
+### `get_auth_url()`
+
+**Triggered by:** `GET /api/auth/gmail/login` when user clicks "Sign in with Google" in the Setup wizard.
+
+**Calls internally:** `_make_flow()` — creates and stores the flow in `_pending_flow`.
+
+Creates the OAuth flow, stores it in a module-level variable `_pending_flow`, generates and returns the Google sign-in URL. The flow must be kept alive because `handle_callback()` needs to reuse the same object to exchange the code for a token. This is the fix for the PKCE `invalid_grant: Missing code verifier` bug.
+
+---
+
+### `handle_callback(code)`
+
+**Triggered by:** `GET /api/auth/gmail/callback` when Google redirects back after the user signs in. This is a browser redirect — not called by the frontend directly.
+
+**Calls internally:**
+- `_pending_flow.fetch_token(code=code)` — exchanges the auth code for access + refresh tokens
+- `_save_credentials(_pending_flow.credentials)` — saves tokens to encrypted storage
+
+Completes the OAuth handshake. Uses the same `_pending_flow` object that `get_auth_url()` created — this is critical because the PKCE code verifier is stored inside that flow object. Clears `_pending_flow` after use.
+
+---
+
+### `is_authenticated()`
+
+**Triggered by:** `GET /api/auth/status` — called by `App.jsx` on startup to decide whether to show the Setup wizard or the main Shell.
+
+**Calls internally:** `_load_credentials()` — returns `True` if credentials load successfully.
+
+---
+
+### `get_gmail_service()`
+
+**Triggered by:** Every function in `service.py` that needs to talk to Gmail — `fetch_inbox()`, `check_new_emails()`, `send_reply()`, `send_compose()`, `delete_contact_emails()`.
+
+**Calls internally:** `_load_credentials()` — raises `RuntimeError` if not authenticated.
+
+Creates and returns a Google API client for Gmail v1. This is the object that all Gmail API calls are made on.
+
+---
+
+### `clear_creds()`
+
+**Triggered by:** `POST /api/auth/signout` when the user clicks sign out.
+
+**Calls internally:** `secret_store.delete_key(_TOKEN_KEY)`.
+
+Deletes the Gmail OAuth token from encrypted storage. The user will need to sign in again.
+
+---
+
+### `trash_message(message_id)`
+
+**Triggered by:** `service.delete_contact_emails()` when `trash_in_gmail=True`.
+
+**Calls internally:** `get_gmail_service()` then calls Gmail API `users.messages.trash`.
+
+Moves one Gmail message to trash (recoverable for 30 days). Does not permanently delete.
+
+---
+
+### `send_mail(to_addr, subject, body, cc, in_reply_to, thread_id)`
+
+**Triggered by:** `service.send_reply()` and `service.send_compose()`.
+
+**Calls internally:** `get_gmail_service()` then calls Gmail API `users.messages.send`.
+
+Constructs a MIME email, base64-encodes it, sends via Gmail API. When `in_reply_to` is provided, sets `In-Reply-To` and `References` headers so Gmail threads the reply correctly. When `thread_id` is provided, Gmail keeps it in the same thread.
+
+---
+
+## auth/routes.py
+
+Four HTTP endpoints for **authentication**.
+
+---
+
+### `auth_status()`
+
+**Route:** `GET /api/auth/status`
+
+**Triggered by:** `App.jsx` on startup after the setup check, to decide whether to show Setup wizard or main Shell.
+
+**Calls internally:** `gmail.is_authenticated()`.
+
+---
+
+### `gmail_login()`
+
+**Route:** `GET /api/auth/gmail/login`
+
+**Triggered by:** User clicks "Sign in with Google" button in the Setup wizard (`Setup.jsx → connectGmail()`).
+
+**Calls internally:** `gmail.get_auth_url()`.
+
+Returns the Google OAuth URL. The frontend opens this in the system browser (not the webview, because Google blocks OAuth in embedded webviews).
+
+---
+
+### `gmail_callback(code, error)`
+
+**Route:** `GET /api/auth/gmail/callback`
+
+**Triggered by:** Google redirects the browser here after the user completes sign-in. Not called by the frontend directly.
+
+**Calls internally:** `gmail.handle_callback(code)`.
+
+Completes the OAuth flow. Returns an HTML page with a success or error message. On success, the page auto-closes after 1.5 seconds. The frontend polls `GET /api/auth/status` every 2 seconds and detects the change.
+
+---
+
+### `signout()`
+
+**Route:** `POST /api/auth/signout`
+
+**Triggered by:** User clicks sign out (`App.jsx → handleSignOut()`).
+
+**Calls internally:** `gmail.clear_creds()`.
+
+Deletes only the Gmail OAuth token. All other data (API keys, emails, settings) is preserved.
+
+---
+
+### `_page(title, body, ok)`
+
+**Triggered by:** `gmail_callback()` internally to build the HTML response page.
+
+**Calls internally:** Nothing. Returns a formatted HTML string.
+
+---
+
+## providers/base.py
+
+**Abstract base class** that every LLM provider must implement.
+
+---
+
+### `clean_llm_output(text)`
+
+**Triggered by:** Each provider's `generate()` method after getting a response.
+
+**Calls internally:** `re.sub()` — strips `<think>...</think>` blocks that some models (like DeepSeek, Qwen) emit as reasoning traces before their actual answer.
+
+---
+
+### Class: `BaseProvider`
+
+Defines the interface every provider must follow.
+
+**Class attributes:**
+- `id` — string ID used in settings (e.g. `"ollama"`)
+- `display_name` — shown in the UI
+- `requires_api_key` — `True` for cloud providers, `False` for Ollama
+- `is_local` — `True` for Ollama only
+
+**`generate(prompt, model)`** — Abstract. Must return the full response as a string.
+
+**`generate_stream(prompt, model)`** — Default implementation just calls `generate()` and yields it as one chunk. Providers that support real streaming override this.
+
+**`test(api_key)`** — Abstract. Validates the API key and returns `(True/False, message)`.
+
+**`list_models(api_key)`** — Abstract. Returns available models as `[{ name, label }]`.
+
+---
+
+## providers/__init__.py
+
+**Provider registry**. Maps provider ID strings to their classes.
+
+---
+
+### `get_provider(provider_id, api_key)`
+
+**Triggered by:** `llm.py → llm_generate()` and `llm_stream()` to instantiate the active provider.
+
+**Calls internally:** Instantiates the provider class — passes `api_key` if `requires_api_key`, otherwise instantiates with no arguments.
+
+Looks up the provider class from `PROVIDERS` dict and creates an instance.
+
+---
+
+### `PROVIDERS` dict
+
+```python
+{
+  "ollama": OllamaProvider,
+  "claude": ClaudeProvider,
+  "openai": OpenAIProvider,
+  "gemini": GeminiProvider,
+}
+```
+
+To add a new provider: create a class, import it here, add it to this dict, and add a default model to `GLOBAL_DEFAULTS["models"]` in `settings.py`.
+
+---
+
+## providers/ollama.py, claude.py, openai.py, gemini.py
+
+Each file is one provider implementing `BaseProvider`. They all follow the same pattern.
+
+---
+
+### `generate(prompt, model)` — all providers
+
+**Triggered by:** `llm_generate()` in `core/llm.py`.
+
+**Calls internally:** `clean_llm_output()` from `base.py` on the response. Makes an HTTP request to the provider's API.
+
+Sends the prompt to the provider's API and returns the response text.
+
+| Provider | API URL | Auth |
+|----------|---------|------|
+| Ollama | `http://localhost:11434/api/generate` | None (local) |
+| Claude | `https://api.anthropic.com/v1/messages` | `x-api-key` header |
+| OpenAI | `https://api.openai.com/v1/chat/completions` | `Authorization: Bearer` header |
+| Gemini | `https://generativelanguage.googleapis.com/v1beta/models/...` | `?key=` query param |
+
+---
+
+### `generate_stream(prompt, model)` — Ollama only
+
+**Triggered by:** `llm_stream()` in `core/llm.py`.
+
+Ollama is the only provider with real streaming implemented. It calls the Ollama API with `stream=True` and yields each token as it arrives by reading the response line by line. Claude, OpenAI, and Gemini fall back to the base class implementation which yields the full response as one chunk.
+
+---
+
+### `test(api_key)` — all providers
+
+**Triggered by:** `POST /api/providers/test` when user clicks "Test" on an API key in the Setup wizard or Settings.
+
+Makes a minimal API call to verify the key works. Returns `(True, "Key is valid")` or `(False, "error message")`.
+
+---
+
+### `list_models(api_key)` — all providers
+
+**Triggered by:** `GET /api/providers/<id>/models` when the provider card expands in the UI.
+
+Ollama queries `http://localhost:11434/api/tags` to get actually installed models. Claude, OpenAI, and Gemini return hardcoded `DEFAULT_MODELS` lists — they don't call the API for this.
+
+---
+
+## providers/routes.py
+
+API endpoints for **provider management**.
+
+---
+
+### `list_providers()`
+
+**Route:** `GET /api/providers`
+
+**Triggered by:** Setup wizard and Settings page load to show all providers and their state.
+
+**Calls internally:** `secret_store.load_keys()`, `app_settings.get("active_provider")`, `app_settings.get("models")`.
+
+Returns all providers with their configuration state: whether they have a key, whether they are active, what model is selected.
+
+---
+
+### `provider_models(provider_id)`
+
+**Route:** `GET /api/providers/<id>/models`
+
+**Triggered by:** When a provider card is selected/expanded in Setup or Settings.
+
+**Calls internally:** `secret_store.get_key(provider_id)`, `get_provider()`, `provider.list_models()`.
+
+---
+
+### `set_provider_key(body)`
+
+**Route:** `POST /api/providers/key`
+
+**Triggered by:** User saves an API key in Setup wizard or Settings.
+
+**Calls internally:** `secret_store.save_key(body.provider_id, body.api_key)`.
+
+---
+
+### `remove_provider_key(provider_id)`
+
+**Route:** `DELETE /api/providers/key/<id>`
+
+**Triggered by:** User removes an API key in Settings.
+
+**Calls internally:** `secret_store.delete_key(provider_id)`.
+
+---
+
+### `test_provider(body)`
+
+**Route:** `POST /api/providers/test`
+
+**Triggered by:** User clicks "Test" button next to an API key.
+
+**Calls internally:** `get_provider()`, `provider.test(api_key)`.
+
+---
+
+### `set_active_provider(body)`
+
+**Route:** `POST /api/providers/active`
+
+**Triggered by:** User selects a provider in Setup wizard finish (`finish()`) or Settings.
+
+**Calls internally:** `secret_store.get_key()` — checks key exists before activating. `app_settings.set_value("active_provider", ...)`.
+
+Will refuse to activate a cloud provider if no API key is saved for it.
+
+---
+
+### `set_provider_model(body)`
+
+**Route:** `POST /api/providers/model`
+
+**Triggered by:** User changes the model dropdown in Setup or Settings.
+
+**Calls internally:** `app_settings.get("models")`, `app_settings.set_value("models", ...)`.
+
+---
+
+## modules/__init__.py
+
+**Module registry**. All modules register here. `main.py` calls `mount_all()` from here.
+
+---
+
+### `mount_all(app)`
+
+**Triggered by:** `main.py` at startup.
+
+**Calls internally:** `app.include_router(m["router"])` for each module in `REGISTRY`.
+
+Loops through `REGISTRY` and mounts each module's router on the FastAPI app. Adding a new module only requires importing it and adding it to `REGISTRY` — `main.py` is untouched.
+
+---
+
+### `list_modules()`
+
+**Route:** `GET /api/modules`
+
+**Triggered by:** Frontend module registry (`registry.jsx`) on app load to discover which modules exist.
+
+**Calls internally:** Nothing. Just filters the `router` key out of each manifest (routers are not JSON-serialisable) and returns the rest.
+
+---
+
+## modules/mailmind/__init__.py
+
+Exports the **MailMind manifest** — the dict that registers this module with the app.
+
+```python
+manifest = {
+    "id": "mailmind",
+    "name": "MailMind",
+    "description": "Inbox triage with AI summaries and reply drafts",
+    "router": router,   ← the FastAPI router from routes.py
+}
+```
+
+---
+
+## modules/mailmind/settings.py
+
+Defines **MailMind's default settings** and creates its scoped settings object.
+
+```python
+DEFAULTS = {
+    "user_name": "Your Name",
+    "user_title": "Your Title",
+    "work_start": "09:00",
+    "work_end": "18:00",
+    "check_interval": 30,
+    "chroma_path": "",       ← set by set_location() on first run
+    "system_prompt": "",     ← custom writing instructions from Settings
+}
+settings = module_settings("mailmind", DEFAULTS)
+```
+
+`settings` is a `ModuleSettings` instance used throughout `service.py` and `setup_routes.py`. Any module file that needs MailMind settings imports `settings` from here.
+
+---
+
+## modules/mailmind/store.py
+
+**File-backed persistence** for emails and the blocklist. All file paths are computed at call time so they follow `DATA_DIR`.
+
+---
+
+### `_email_store_file()`, `_blocklist_file()`, `_email_lock()`
+
+Path helpers computed at call time. `_email_lock()` returns a `FileLock` — a cross-process mutex that prevents two threads from reading/writing `mailmind_emails.json` simultaneously.
+
+---
+
+### `load_emails()`
+
+**Triggered by:** Almost every function in `service.py` — listing, fetching, summarising, flagging, replying, blocking, contacts.
+
+**Calls internally:** `_email_lock()`, `_email_store_file()`.
+
+Acquires the file lock, reads `mailmind_emails.json`, returns it as a dict keyed by email ID. Returns empty dict if file does not exist or is corrupted. The file lock ensures no two simultaneous operations corrupt the file.
+
+---
+
+### `save_emails(store)`
+
+**Triggered by:** After any operation that modifies emails — fetch, summarise, flag, dismiss, block, reply, compose.
+
+**Calls internally:** `_email_lock()`, `_email_store_file()`.
+
+Acquires the file lock and writes the full emails dict as formatted JSON. Always writes the complete dict.
+
+---
+
+### `load_blocklist()` and `save_blocklist(bl)`
+
+**Triggered by:** `block_sender()`, `is_blocked()`, `add_to_blocklist()`, `remove_from_blocklist()`, `get_blocklist()`.
+
+**Calls internally:** `_blocklist_file()`.
+
+No file lock on the blocklist — it is only written by explicit user actions (not background threads), so contention is not a concern.
+
+---
+
+### `is_blocked(sender_email, sender_name)`
+
+**Triggered by:** `fetch_inbox()` for every email being imported, to skip blocked senders before storing.
+
+**Calls internally:** `load_blocklist()`.
+
+Checks if any blocklist entry appears in the combined `sender_email + sender_name` string. Case-insensitive substring match.
+
+---
+
+### `is_promo(sender, subject)`
+
+**Triggered by:** `fetch_inbox()` for every email being imported, to skip promotional emails before storing.
+
+**Calls internally:** Nothing. Checks against the hardcoded `PROMO_KEYWORDS` list.
+
+Checks if any promo keyword (e.g. `"noreply"`, `"newsletter"`, `"unsubscribe"`) appears in the combined sender + subject string.
+
+---
+
+## modules/mailmind/parsing.py
+
+**Pure parsing functions**. No I/O, no state, no side effects. Takes raw email data and returns clean data.
+
+---
+
+### `format_email_time(date_str)`
+
+**Triggered by:** `fetch_inbox()` for each email to produce the human-readable time shown in the inbox list.
+
+Formats an RFC 2822 date string into a human-readable time. Today's emails show `HH:MM`, this year shows `DD Mon · HH:MM`, older shows `DD Mon YYYY`.
+
+---
+
+### `parse_date(date_str)`
+
+**Triggered by:** `list_emails()` for date range filtering. `list_contacts()` to sort by most recent. `_time_key()` for sorting.
+
+Parses an RFC 2822 date string into a `datetime` object. Returns `None` on failure.
+
+---
+
+### `decode_mime_header(header)`
+
+**Triggered by:** `fetch_inbox()` for every email's Subject and From headers.
+
+Decodes MIME-encoded email headers (e.g. `=?UTF-8?B?...?=` encoded subjects) into plain Unicode strings.
+
+---
+
+### `clean_html(html)`
+
+**Triggered by:** `extract_body()` when an email has only an HTML part.
+
+Strips style/script/head tags, converts block elements to newlines, decodes HTML entities. Returns clean plain text.
+
+---
+
+### `extract_body(msg)`
+
+**Triggered by:** `fetch_inbox()` for every email to get the text content.
+
+**Calls internally:** `clean_html()` when falling back to the HTML part.
+
+Walks the MIME structure of an email. Tries to get `text/plain` first. Falls back to `text/html` if no plain text part exists. Skips attachments.
+
+---
+
+### `normalize_subject(subject)`
+
+**Triggered by:** `fetch_inbox()` when storing `thread_subject`. Used throughout `service.py` for thread grouping.
+
+Strips `Re:`, `Fwd:`, `Fw:`, `Aw:`, `Sv:` prefixes from a subject and lowercases it. This is how threads are grouped — `"Re: Meeting"` and `"Meeting"` get the same `thread_subject` so they are treated as one conversation.
+
+---
+
+### `extract_sender_name(sender_full)`
+
+**Triggered by:** `extract_real_name()`.
+
+Extracts the display name from a full sender string like `"John Smith <john@example.com>"`. Returns the part before the `<`.
+
+---
+
+### `extract_real_name(sender_full)`
+
+**Triggered by:** `fetch_inbox()` for every email to get the sender's display name and first name.
+
+**Calls internally:** `extract_sender_name()`.
+
+Returns `(display_name, first_name)`. The first name is used in reply prompts (`"Hi {first_name}"`). Handles edge cases: titles (Dr, Mr, Mrs), single-word names, garbled addresses.
+
+---
+
+## modules/mailmind/prompts.py
+
+**Prompt templates** for all AI operations. Optimised for small local models — short, direct, no ambiguity.
+
+---
+
+### `_rules(system_prompt, for_reply)`
+
+**Triggered by:** `reply_prompt()` and `compose_prompt()` internally.
+
+Builds the numbered rules block included in every reply/compose prompt. Three baseline rules always included. A fourth is added for replies (match sender's style). The user's custom `system_prompt` from Settings becomes rule 5 if set.
+
+---
+
+### `summary_prompt(sender, subject, body, user_name)`
+
+**Triggered by:** `service.summarise()` and `service.summarise_stream()` for non-flagged emails.
+
+Builds a prompt asking the LLM to summarise one email covering four points: what it is about, any requests/instructions, any dates/amounts, what the user needs to do next. Body is capped at 1500 chars.
+
+---
+
+### `conversation_summary_prompt(sender, thread_emails, user_name)`
+
+**Triggered by:** `service.summarise_stream()` for flagged emails.
+
+Builds a prompt for summarising a full thread (both incoming and sent). Takes the last 4 emails of the thread, each capped at 300 chars. The 4-email cap is intentional — small models lose track of who said what beyond that.
+
+---
+
+### `reply_prompt(user_name, user_title, sender_first, subject, context, user_intent, thread_context, system_prompt)`
+
+**Triggered by:** `service.draft_reply()`.
+
+**Calls internally:** `_rules(system_prompt, for_reply=True)`.
+
+Builds a reply draft prompt. Ends with `"Hi {sender_first},"` — output priming so the model continues the email rather than deciding what format to use. Context is capped at 800 chars. Thread context from ChromaDB is appended if available.
+
+---
+
+### `contact_emails_prompt(sender, emails, user_name)`
+
+**Triggered by:** `service.summarise_contacts()`.
+
+Builds a prompt for bulk-summarising all emails from one sender. Uses the last 6 emails, each capped at 400 chars. Total cap 2000 chars.
+
+---
+
+### `compose_prompt(user_name, user_title, to_name, subject, user_intent, system_prompt)`
+
+**Triggered by:** `service.draft_compose()`.
+
+**Calls internally:** `_rules(system_prompt, for_reply=False)`.
+
+Builds a new email compose prompt. Same structure as reply but without thread context or matching-sender-style rule.
+
+---
+
+## modules/mailmind/chroma.py
+
+**Optional vector store** for flagged email context. Fails silently if `chromadb` is not installed.
+
+---
+
+### `_safe_resolve(chroma_path)`
+
+**Triggered by:** `_get_collection()` before opening ChromaDB.
+
+**Calls internally:** `Path.expanduser().resolve()`.
+
+Resolves the path and checks it against `_BLOCKED_PREFIXES` (`/etc`, `/sys`, `/proc`, `/dev`, `/usr`, `/bin`, `/sbin`, `/boot`). Returns `None` if the path points to a system directory. This is a security check because `chroma_path` comes from user settings which can be manually edited.
+
+---
+
+### `_get_collection(chroma_path)`
+
+**Triggered by:** `embed_email()`, `delete_embedding()`, `query_similar()`.
+
+**Calls internally:** `_safe_resolve()`, then `chromadb.PersistentClient()` and `client.get_or_create_collection()`.
+
+Lazy-imports `chromadb` so the module loads even without it installed. Creates the workspace folder if needed. Opens the ChromaDB collection `"email_threads"` with cosine similarity space. Returns `None` if anything fails — all callers handle `None` gracefully.
+
+---
+
+### `embed_email(email_data, chroma_path)`
+
+**Triggered by:** `service.summarise_stream()` after generating a flagged email's summary. Also by `_background_resurface()` after background re-summarisation.
+
+**Calls internally:** `_get_collection(chroma_path)`.
+
+Stores a document in ChromaDB representing the flagged email. The document is a formatted string of sender, subject, summary, and body excerpt. Uses `upsert` so re-embedding an existing email updates it rather than duplicating it.
+
+---
+
+### `delete_embedding(email_id, chroma_path)`
+
+**Triggered by:** `service.toggle_flag()` when unflagging. `service.dismiss()` when dismissing a flagged email. `service.block_sender()` for all emails from that sender. `service.delete_contact_emails()`.
+
+**Calls internally:** `_get_collection(chroma_path)`.
+
+Removes one email's embedding from ChromaDB by ID.
+
+---
+
+### `query_similar(sender, subject, chroma_path, n)`
+
+**Triggered by:** `service.draft_reply()` for flagged emails to add thread context to the reply prompt.
+
+**Calls internally:** `_get_collection(chroma_path)`.
+
+Queries ChromaDB for the `n` most similar past emails to the given sender+subject. Returns a formatted string of matching documents prefixed with `"\n\nPast context from similar emails:\n"`. Returns empty string if nothing found or ChromaDB unavailable.
+
+---
+
+## modules/mailmind/routes.py
+
+**Thin HTTP layer** for MailMind. Each route just validates the request and delegates to `service.py`. No business logic here.
+
+Routes are grouped into: emails, reply, compose, contacts, blocklist, daemon, settings. See the API surface table in README.md for the full list.
+
+The only route with logic beyond delegation is `summarise_stream` — it checks the email exists before starting the stream, then returns a `StreamingResponse` which calls `service.summarise_stream()` as a generator.
+
+---
+
+## modules/mailmind/service.py
+
+**All MailMind business logic**. The largest file in the project.
+
+---
+
+### `_time_key(e)`
+
+**Triggered by:** `sorted()` calls throughout the file for chronological ordering.
+
+**Calls internally:** `parsing.parse_date()`.
+
+Returns a float timestamp for sorting. Returns 0.0 if the date cannot be parsed (puts those emails at the bottom).
+
+---
+
+### `fetch_inbox(date_from, date_to)`
+
+**Triggered by:** `POST /api/modules/mailmind/emails/fetch`. Also called by `check_new_emails()` when new emails are detected, and by the daemon when the history ID is stale.
+
+**Calls internally:**
+- `gmail.get_gmail_service()` — Gmail API client
+- `store.load_emails()` — current local cache
+- `store.is_promo()`, `store.is_blocked()` — filters
+- `parsing.decode_mime_header()`, `parsing.format_email_time()`, `parsing.extract_body()`, `parsing.extract_real_name()`, `parsing.normalize_subject()` — email parsing
+- `_invalidate_stale_thread_summaries()` — marks flagged threads needing re-summarisation
+- `store.save_emails()` — persists merged result
+- `threading.Thread(_background_resurface)` — spawns background re-summarise for each invalidated thread
+- `_save_history_id()` — saves the new Gmail historyId for the daemon
+
+Fetches up to 50 emails from Gmail. For each new email ID not already in the local store: fetches the raw RFC 2822 message, parses it, skips promos and blocked senders, stores it. After fetching, checks if any new emails belong to a flagged conversation and triggers background re-summarisation. Saves the Gmail historyId for the daemon to use next time.
+
+---
+
+### `_invalidate_stale_thread_summaries(emails, new_ids)`
+
+**Triggered by:** `fetch_inbox()` after storing new emails.
+
+**Calls internally:** `parsing.normalize_subject()`.
+
+Builds an index of all flagged emails grouped by `(sender_email, thread_subject)`. For each new email, checks if it shares a sender+subject with a flagged email. If yes, marks that flagged email's summary as stale (`summarised=False, summary=""`). Returns the list of flagged IDs that need re-summarisation. Uses a set for deduplication so the same email is only re-summarised once even if multiple new emails arrive in the same thread.
+
+---
+
+### `_background_resurface(email_id)`
+
+**Triggered by:** `fetch_inbox()` — spawns a daemon thread for each invalidated flagged email.
+
+**Calls internally:** `summarise_stream(email_id)` — exhausts the generator. The `finally` block inside `summarise_stream` handles saving and ChromaDB re-embedding.
+
+Background thread that re-generates a flagged conversation's summary after a new email arrives in its thread. By the time the user opens the email, the updated summary is already ready.
+
+---
+
+### `list_emails(date_from, date_to, flagged_only)`
+
+**Triggered by:** `GET /api/modules/mailmind/emails` — called on every inbox load and after any mutation.
+
+**Calls internally:** `store.load_emails()`, `parsing.parse_date()`.
+
+Reads the local email store, filters out `direction=sent` records (those are for conversation context only), applies date range and flagged-only filters, sorts by date descending. All filtering happens locally — no Gmail API call.
+
+---
+
+### `summarise(email_id)`
+
+**Triggered by:** `POST /api/modules/mailmind/emails/<id>/summarise` — non-streaming version.
+
+**Calls internally:** `store.load_emails()`, `module_settings.get()`, `prompts.summary_prompt()`, `llm_generate()`, `store.save_emails()`.
+
+Returns cached summary if already generated. Otherwise calls the LLM and caches the result. Only used for non-flagged emails (flagged emails always use `summarise_stream` for conversation-level summaries).
+
+---
+
+### `summarise_stream(email_id)`
+
+**Triggered by:** `POST /api/modules/mailmind/emails/<id>/summarise/stream` — the main summarise path. Also called by `_background_resurface()`.
+
+**Calls internally:** `store.load_emails()`, `module_settings.get()`, `parsing.normalize_subject()`, `prompts.conversation_summary_prompt()` or `prompts.summary_prompt()`, `llm_stream()`, `store.save_emails()`, `chroma.embed_email()`.
+
+The most important function in MailMind. For flagged emails, gathers all emails from the same sender+thread (both incoming and sent replies), builds a conversation prompt, streams the result. For normal emails, builds a single-email prompt.
+
+Has a `try/finally` block that always saves whatever was generated — even if the client disconnects mid-stream or the LLM errors out. If the LLM returns nothing, falls back to a plain excerpt from the email body. After saving, if the email is flagged, re-embeds into ChromaDB with the new summary.
+
+---
+
+### `get_thread(email_id)`
+
+**Triggered by:** `GET /api/modules/mailmind/emails/<id>/thread` — called when a flagged email is opened to show the full conversation.
+
+**Calls internally:** `store.load_emails()`, `parsing.normalize_subject()`.
+
+Returns all emails in a thread chronologically: incoming emails from the same sender with the same thread_subject, plus sent replies (`direction=sent`) addressed to that sender with the same thread_subject. Excludes `composed_anchor` entries.
+
+---
+
+### `toggle_flag(email_id)`
+
+**Triggered by:** `POST /api/modules/mailmind/emails/flag` — user clicks the flag button.
+
+**Calls internally:** `store.load_emails()`, `store.save_emails()`, `module_settings.get()`, `chroma.delete_embedding()`.
+
+Toggles `flagged` boolean. Always resets `summarised=False` and clears `summary` so the next open regenerates with the appropriate prompt type (conversation for flagged, single-email for unflagged). If unflagging, immediately removes the ChromaDB embedding. If flagging, embedding happens later after the conversation summary is generated.
+
+---
+
+### `dismiss(email_id, delete_embeddings)`
+
+**Triggered by:** `POST /api/modules/mailmind/emails/dismiss` — user clicks dismiss.
+
+**Calls internally:** `store.load_emails()`, `module_settings.get()`, `chroma.delete_embedding()`, `store.save_emails()`.
+
+Two different behaviours depending on whether the email is flagged:
+- **Flagged:** deletes ChromaDB embedding, unflags the email, clears summary. Email stays in the inbox.
+- **Normal (unflagged):** deletes the email from the local store entirely.
+
+---
+
+### `block_sender(email_id)`
+
+**Triggered by:** `POST /api/modules/mailmind/emails/<id>/block-sender`.
+
+**Calls internally:** `store.load_emails()`, `store.load_blocklist()`, `store.save_blocklist()`, `chroma.delete_embedding()`, `store.save_emails()`.
+
+Adds the sender's email to the blocklist. Then removes every email from that sender across all threads (not just the clicked one), deletes all their ChromaDB embeddings, and removes all sent reply records addressed to them.
+
+---
+
+### `draft_compose(to, cc, subject, user_intent, to_name)`
+
+**Triggered by:** `POST /api/modules/mailmind/compose/draft`.
+
+**Calls internally:** `module_settings.load()`, `_extract_display_name()`, `prompts.compose_prompt()`, `llm_generate()`.
+
+Generates a new outgoing email draft from the user's intent. Uses `to_name` if provided; otherwise extracts it from the `to` address.
+
+---
+
+### `send_compose(to, cc, subject, draft, flag, to_name)`
+
+**Triggered by:** `POST /api/modules/mailmind/compose/send`.
+
+**Calls internally:** `_extract_email()`, `gmail.send_mail()`, `module_settings.load()`, `parsing.normalize_subject()`, `store.load_emails()`, `store.save_emails()`.
+
+Sends the composed email via Gmail. If `flag=True`, creates two store entries: an `anchor` entry (appears in inbox as a flagged conversation with that contact) and a `sent` entry (appears in the thread view). This is how an outgoing email becomes a trackable conversation.
+
+---
+
+### `draft_reply(email_id, user_intent)`
+
+**Triggered by:** `POST /api/modules/mailmind/reply/draft`.
+
+**Calls internally:** `store.load_emails()`, `module_settings.load()`, `chroma.query_similar()` (for flagged), `prompts.reply_prompt()`, `llm_generate()`.
+
+Generates a reply draft. For flagged emails, queries ChromaDB for similar past conversations to include as context in the prompt. Uses the email's existing summary as context if available, otherwise falls back to the raw body.
+
+---
+
+### `send_reply(email_id, draft)`
+
+**Triggered by:** `POST /api/modules/mailmind/reply/send`.
+
+**Calls internally:** `store.load_emails()`, `gmail.get_gmail_service()` (for backfill), `gmail.send_mail()`, `module_settings.load()`, `parsing.normalize_subject()`, `store.save_emails()`.
+
+Sends the reply via Gmail with proper threading headers (`In-Reply-To`, `References`, `threadId`). If the email was stored before threading fields were added, backfills them live from the Gmail API. For flagged emails, creates a `sent` record in the store and resets the summary so the next open regenerates with the sent reply included in the conversation.
+
+---
+
+### `list_contacts()`
+
+**Triggered by:** `GET /api/modules/mailmind/contacts` — user opens the Contacts panel.
+
+**Calls internally:** `store.load_emails()`, `parsing.parse_date()`.
+
+Groups all inbox emails by `sender_email`, counts messages per sender, tracks their most recent email date. Returns sorted by most recent.
+
+---
+
+### `summarise_contacts(sender_emails)`
+
+**Triggered by:** `POST /api/modules/mailmind/contacts/summarise` — user clicks "Summarise selected".
+
+**Calls internally:** `store.load_emails()`, `module_settings.get()`, `prompts.contact_emails_prompt()`, `llm_generate()`.
+
+For each selected sender, collects all their emails, builds a contact summary prompt, calls the LLM. Processes one sender at a time. Returns a dict of summaries keyed by email address.
+
+---
+
+### `delete_contact_emails(sender_emails, trash_in_gmail)`
+
+**Triggered by:** `POST /api/modules/mailmind/contacts/delete`.
+
+**Calls internally:** `store.load_emails()`, `module_settings.get()`, `gmail.trash_message()` (if `trash_in_gmail=True`), `chroma.delete_embedding()`, `store.save_emails()`.
+
+Deletes all emails from selected senders. If `trash_in_gmail=True`, moves each email to Gmail trash (recoverable for 30 days). Also deletes ChromaDB embeddings and sent reply records for those senders.
+
+---
+
+### `get_blocklist()`, `add_to_blocklist(entry)`, `remove_from_blocklist(entry)`
+
+**Triggered by:** Blocklist management routes (`GET/POST /api/modules/mailmind/blocklist`).
+
+**Calls internally:** `store.load_blocklist()`, `store.save_blocklist()`.
+
+Simple CRUD on the blocklist JSON file.
+
+---
+
+### `check_new_emails()`
+
+**Triggered by:** `_daemon_loop()` every 60 seconds during work hours.
+
+**Calls internally:** `_stored_history_id()`, `gmail.get_gmail_service()`, `_save_history_id()`, `fetch_inbox()`.
+
+Uses Gmail's History API to detect new emails cheaply. Sends the stored `historyId` to Gmail — Gmail returns only changes since that ID. If new messages are found in the inbox, calls `fetch_inbox()` for a full sync. Always advances the stored historyId. If the historyId is stale (>30 days), falls back to a full fetch to reset it.
+
+---
+
+### `_stored_history_id()` and `_save_history_id(history_id)`
+
+**Triggered by:** `check_new_emails()` and `fetch_inbox()`.
+
+**Calls internally:** `module_settings.get()` and `module_settings.load()/save()`.
+
+Read and write the Gmail `historyId` from/to MailMind settings. The historyId is Gmail's cursor — it marks the last known state of the mailbox so the daemon can ask "what changed since here?"
+
+---
+
+### `_within_work_hours(work_start, work_end)`
+
+**Triggered by:** `_daemon_loop()` on every tick.
+
+**Calls internally:** Nothing. Uses `datetime.now().time()` and `datetime.strptime()`.
+
+Returns `True` if the current time is within the configured work hours. Outside work hours, the daemon skips its check and waits for the next tick.
+
+---
+
+### `_daemon_loop(stop_event)`
+
+**Triggered by:** `start_daemon()` — runs in a background thread named `"mailmind-daemon"`.
+
+**Calls internally:** `module_settings.load()`, `_within_work_hours()`, `check_new_emails()`.
+
+The daemon's main loop. Runs forever until `stop_event` is set. Each iteration: if paused, waits 2 seconds and loops. If within work hours, calls `check_new_emails()`. Then waits 60 seconds before the next check. When `stop_event` is set, exits cleanly and resets `_daemon_state`.
+
+---
+
+### `daemon_status()`, `start_daemon()`, `pause_daemon()`, `resume_daemon()`, `stop_daemon()`
+
+**Triggered by:** Daemon control routes (`GET/POST /api/modules/mailmind/daemon/*`). The frontend polls `daemon_status` every 15 seconds to update the UI indicator.
+
+`start_daemon()` — creates a new `threading.Event`, sets `running=True`, spawns the daemon thread.
+
+`pause_daemon()` / `resume_daemon()` — flip `_daemon_state["paused"]`. The loop checks this every 2 seconds when paused.
+
+`stop_daemon()` — calls `_stop_event.set()` which signals the daemon thread to exit at the top of its next iteration.
+
+`daemon_status()` — returns `running`, `paused`, `last_check`, and `active_provider`. Frontend uses this to show the status pill and last-checked time.
+
+---
+
+## How It All Connects — End to End Example
+
+**User opens a flagged email:**
+
+```
+User clicks flagged email in inbox
+      ↓
+Frontend calls POST /api/modules/mailmind/emails/<id>/summarise/stream
+      ↓
+routes.py → summarise_stream route → StreamingResponse(service.summarise_stream(id))
+      ↓
+service.summarise_stream():
+  - load_emails() from store.py
+  - email is flagged → gather all thread emails
+  - build conversation_summary_prompt() from prompts.py
+  - call llm_stream() from core/llm.py
+      → reads active_provider from settings.py
+      → gets API key from secret_store.py
+      → calls OllamaProvider.generate_stream() or ClaudeProvider.generate()
+  - yield each token → frontend appends to UI
+  - finally: save_emails(), embed_email() into chroma.py
+      ↓
+Frontend shows summary appearing word by word
+```
+
+**Daemon detects a new email:**
+
+```
+60 seconds pass
+      ↓
+_daemon_loop() wakes up
+      ↓
+_within_work_hours() → True
+      ↓
+check_new_emails():
+  - reads stored historyId from settings.py
+  - calls Gmail History API → gets new message IDs
+  - saves new historyId
+  - calls fetch_inbox()
+      ↓
+fetch_inbox():
+  - fetches new emails from Gmail
+  - parses with parsing.py
+  - skips promos (store.is_promo) and blocked (store.is_blocked)
+  - stores in mailmind_emails.json
+  - _invalidate_stale_thread_summaries() → finds flagged threads affected
+  - saves emails
+  - spawns _background_resurface() thread for each affected flagged thread
+      ↓
+_background_resurface():
+  - calls summarise_stream() → re-generates conversation summary
+  - saves result + re-embeds in ChromaDB
+      ↓
+15 seconds later, frontend polls daemon/status
+  - last_check updated → frontend re-fetches email list
+  - updated summary merged into UI without navigation
+```

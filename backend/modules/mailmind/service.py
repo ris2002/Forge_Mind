@@ -205,8 +205,6 @@ def list_emails(
     date_to: str | None = None,
     flagged_only: bool = False,
 ) -> list[dict]:
-    from datetime import datetime
-
     emails = list(store.load_emails().values())
     # Sent reply records are stored for conversation context only, not inbox display
     emails = [e for e in emails if e.get("direction") != "sent"]
@@ -842,7 +840,7 @@ def check_new_emails() -> bool:
             userId="me",
             startHistoryId=stored_id,
             historyTypes=["messageAdded"],
-            labelId="INBOX",
+            labelIds=["INBOX"],
         ).execute()
     except Exception as e:
         err = str(e)
